@@ -504,7 +504,7 @@ static int gfx_init(ID3D12Device* dev, DXGI_FORMAT rtfmt)
  * the ones marked "restart" are read once at startup.
  * =========================================================================*/
 volatile int g_ui_fps_cap = -2;      /* -2 not set (launcher F7 behaviour), 0 off, 1 auto (v209), else fps -- infamous_clock_probe.h */
-volatile int g_ui_kbm_glyphs = -1;   /* -1 env, 0 controller, 1 auto, 2 keyboard/mouse -- rsx_d3d12_backend.c */
+volatile int g_ui_kbm_glyphs = -1;   /* -1 env, else KBM_GLYPHS: 1 auto, 0 PlayStation, 2 keyboard/mouse, 3 Xbox, 4 Nintendo, 5 Steam Deck -- rsx_d3d12_backend.c */
 volatile int g_ui_mouse_speed = 0;   /* 0 env, else px/s for a full stick -- cellPad.c */
 volatile int g_set_vsync = -1;       /* -1 env, 0/1 -- rsx_d3d12_backend.c present_sync_interval */
 extern volatile int g_win_fullscreen;   /* rsx_d3d12_backend.c window proc (F11) */
@@ -519,7 +519,7 @@ static MItem s_mi[] = {
     { "FULLSCREEN",      "Display Mode",       0, 2, { "0", "1" }, { "Windowed", "Fullscreen" } },
     { "PRESENT_VSYNC",   "VSync",              0, 2, { "0", "1" }, { "Off", "On" } },
     { "UI_FPS_CAP",      "Frame Rate Limit",   0, 6, { "0", "60", "50", "45", "40", "30" }, { "Off", "60 FPS", "50 FPS", "45 FPS", "40 FPS", "30 FPS" } },   /* v209b: Auto removed */
-    { "KBM_GLYPHS",      "Button Prompts",     0, 3, { "1", "0", "2" }, { "Automatic", "Controller", "Keyboard & Mouse" } },
+    { "KBM_GLYPHS",      "Button Prompts",     0, 6, { "1", "0", "2", "3", "4", "5" }, { "Automatic", "PlayStation", "Keyboard & Mouse", "Xbox", "Nintendo", "Steam Deck" } },
     { "PAD_MOUSE_SPEED", "Mouse Speed",        0, 5, { "900", "650", "450", "325", "225" }, { "1 (Slow)", "2", "3", "4", "5 (Fast)" } },
     { "RES_SCALE",       "Resolution",         1, 5, { "1", "1.5", "2", "2.5", "3" }, { "720p", "1080p", "1440p", "1800p", "2160p (4K)" } },
     { "SHADOWS",         "Shadows",            1, 2, { "1", "0" }, { "On", "Off" } },

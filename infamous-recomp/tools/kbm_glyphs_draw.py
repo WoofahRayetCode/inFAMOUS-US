@@ -63,14 +63,21 @@ def cluster(dr, x0,y0,x1,y1, labels):
     keycap(dr, ox+kw+g, y0, ox+2*kw+g, y0+kh, labels[0], 0.70)
     for i,t in enumerate(labels[1:]):
         keycap(dr, ox+i*(kw+g), y0+kh+g, ox+i*(kw+g)+kw, y1, t, 0.70)
-GL={ # code: (kind, arg)
- 0xF080:('key','C'), 0xF081:('key','F'), 0xF082:('key','E'), 0xF083:('key','SPACE'),
- 0xF084:('mouse','R'), 0xF085:('key','Q'), 0xF086:('mouse','L'), 0xF087:('key','R'),
- 0xF088:('key','ESC'), 0xF089:('key','TAB'), 0xF08A:('cluster',['W','A','S','D']), 0xF08B:('key','V'),
- 0xF08C:('mouse','move'), 0xF08D:('mouse','M'),
- 0xF090:('cluster',['↑','←','↓','→']), 0xF091:('key','→'), 0xF092:('key','CTRL'),
- 0xF093:('key','←'), 0xF094:('key','↓'),
-}
+import kbm_bindings
+def gl_for(b):
+    """code: (kind, arg) for the bindings b (kbm_bindings.load()). Cells: F080 Circle, F081 Square, F082 Triangle,
+    F083 Cross, F084 L1, F085 L2, F086 R1, F087 R2, F088 START, F089 SELECT, F08A left stick, F08B L3, F08C right stick,
+    F08D R3, F090-F094 d-pad (F092 = up = Precision)"""
+    g = kbm_bindings.glyph
+    lab = lambda a: g(b[a])[1] if g(b[a])[0] == 'key' else {'L': 'LMB', 'R': 'RMB', 'M': 'MMB'}[g(b[a])[1]]
+    return {0xF080: g(b['circle']), 0xF081: g(b['melee']), 0xF082: g(b['triangle']), 0xF083: g(b['jump']),
+            0xF084: g(b['aim']), 0xF085: g(b['l2']), 0xF086: g(b['fire']), 0xF087: g(b['r2']),
+            0xF088: g(b['start']), 0xF089: g(b['select']),
+            0xF08A: ('cluster', [lab('forward'), lab('left'), lab('back'), lab('right')]), 0xF08B: g(b['l3']),
+            0xF08C: ('mouse', 'move'), 0xF08D: g(b['r3']),
+            0xF090: ('cluster', ['↑', '←', '↓', '→']), 0xF091: ('key', '→'), 0xF092: g(b['precision']),
+            0xF093: ('key', '←'), 0xF094: ('key', '↓')}
+GL = gl_for(kbm_bindings.load())   # the port's defaults, or the player's controls.ini
 CELLS={0xF080:(61,162,52,52),0xF081:(114,162,52,52),0xF082:(167,162,52,52),0xF083:(220,162,52,52),0xF084:(408,0,60,52),
  0xF085:(0,109,60,52),0xF086:(61,109,60,52),0xF087:(122,109,60,52),0xF088:(183,109,60,52),0xF089:(244,109,60,52),
  0xF08A:(305,109,60,52),0xF08B:(366,109,60,52),0xF08C:(427,53,60,52),0xF08D:(0,162,60,52),0xF090:(273,162,52,52),

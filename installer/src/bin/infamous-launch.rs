@@ -235,7 +235,7 @@ const DISPLAY: &[Row] = &[
         hint: "Internal rendering resolution.",
         vals: &["1", "1.5", "2", "2.5", "3"],
         names: &["720p", "1080p", "1440p", "1800p", "2160p (4K)"],
-        fallback: 0,
+        fallback: 1,
     },
     Row {
         key: "PRESENT_VSYNC",
@@ -251,7 +251,7 @@ const DISPLAY: &[Row] = &[
         hint: "Upper limit for the frame rate.",
         vals: &["0", "60", "50", "45", "40", "30"],
         names: &["Off", "60 FPS", "50 FPS", "45 FPS", "40 FPS", "30 FPS"],
-        fallback: 0,
+        fallback: 1,
     },
 ];
 
@@ -369,9 +369,9 @@ const CONTROLS: &[Row] = &[
     Row {
         key: "KBM_GLYPHS",
         label: "Button Prompts",
-        hint: "Automatic follows whichever device you used last.",
-        vals: &["1", "0", "2"],
-        names: &["Automatic", "Controller", "Keyboard & Mouse"],
+        hint: "Automatic follows the device you used last: PlayStation, Xbox, Nintendo or Steam Deck glyphs, or keys.",
+        vals: &["1", "0", "2", "3", "4", "5"],
+        names: &["Automatic", "PlayStation", "Keyboard & Mouse", "Xbox", "Nintendo", "Steam Deck"],
         fallback: 0,
     },
     Row {

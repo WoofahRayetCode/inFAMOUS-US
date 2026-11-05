@@ -54,3 +54,14 @@ __pycache__/
 *.pyc
 *.pre_*
 *.bak
+
+# Optional upscaler SDKs placed next to the port (see README: DLSS and FSR)
+/dlss-sdk/
+/fsr-sdk/
+
+# Written by the installer / diagnostics on each machine
+/Update inFamous.cmd
+/play-dred.cmd
+installer/launch.txt
+infamous-recomp/*.hlsl
+infamous-recomp/controls.ini

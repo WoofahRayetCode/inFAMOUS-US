@@ -26,6 +26,7 @@ typedef struct PadSdlPad {
     uint16_t buttons;              /* CELL_PAD_CTRL_* */
     uint8_t  lx, ly, rx, ry;       /* 0..255, centre 128, up = 0 */
     uint8_t  l2, r2;               /* 0..255 */
+    uint8_t  type;                 /* PAD_TYPE_* (cellPad.h) of this gamepad */
 } PadSdlPad;
 
 /* Host poll thread only: SDL init on first call, hot-plug, state, rumble and light bar. */

@@ -9,7 +9,7 @@ The inFamous-specific half of the port, built on top of `../ps3recomp`.
 | `trainer.cpp`, `trainer.h` | The in-game trainer (F10): god mode, energy, health, XP, karma, Super Speed, Player Model |
 | `infamous_clock_probe.h`, `car_v233.h` | Frame pacing and streaming / pop-in options |
 | `spu/jobmods_extra_map.json`, `spu/jobmod_*/lodx_*.h` | Hand-written additions to the lifted SPU job modules |
-| `tools` | Asset tools run by the installer: dialog font, keyboard/mouse prompt glyphs |
+| `tools` | Asset tools run by the installer: dialog font, keyboard/mouse prompt glyphs (`make_kbm_icons.py`, `make_kbm_prompts.py`, bindings from `controls.ini` via `kbm_bindings.py`), Xbox / Nintendo / Steam Deck prompt sets (`make_prompt_sets.py`), region fixes (`region_fixups.py`) |
 | `config.toml` | Recompiler configuration |
 
 `recompiled/`, `spu/` and `spu-images/` are generated from your own game by the

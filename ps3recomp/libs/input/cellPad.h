@@ -24,6 +24,13 @@ extern "C" {
 #define CELL_MAX_PADS               CELL_PAD_MAX_PORT_NUM
 
 /* Button bitmask constants (digital buttons, in button[2] low word) */
+/* Controller family of a host pad, for the button prompts: cellPad.c g_input_pad_type (the pad used last),
+ * rsx_d3d12_backend.c prompt sets (assets/xbox_icons.bin ...). Pads SDL cannot classify count as PlayStation. */
+#define PAD_TYPE_PLAYSTATION 0
+#define PAD_TYPE_XBOX        1
+#define PAD_TYPE_NINTENDO    2
+#define PAD_TYPE_STEAM       3
+
 #define CELL_PAD_CTRL_SELECT        (1 << 0)
 #define CELL_PAD_CTRL_L3            (1 << 1)
 #define CELL_PAD_CTRL_R3            (1 << 2)

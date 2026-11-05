@@ -92,8 +92,23 @@ static const char* type_name(SDL_GamepadType t)
     case SDL_GAMEPAD_TYPE_PS5: return "DualSense";
     case SDL_GAMEPAD_TYPE_STEAM: return "Steam Controller";
     case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_PRO: return "Switch Pro";
+    case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_LEFT: case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_RIGHT:
+    case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_PAIR: return "Joy-Con";
+    case SDL_GAMEPAD_TYPE_GAMECUBE: return "GameCube";
     case SDL_GAMEPAD_TYPE_XBOX360: case SDL_GAMEPAD_TYPE_XBOXONE: return "Xbox";
     default: return "gamepad";
+    }
+}
+/* the prompt family of an SDL gamepad type (cellPad.h PAD_TYPE_*) */
+static uint8_t pad_type_of(SDL_GamepadType t)
+{
+    switch (t) {
+    case SDL_GAMEPAD_TYPE_XBOX360: case SDL_GAMEPAD_TYPE_XBOXONE: return PAD_TYPE_XBOX;
+    case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_PRO: case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_LEFT:
+    case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_RIGHT: case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_PAIR:
+    case SDL_GAMEPAD_TYPE_GAMECUBE: return PAD_TYPE_NINTENDO;
+    case SDL_GAMEPAD_TYPE_STEAM: return PAD_TYPE_STEAM;
+    default: return PAD_TYPE_PLAYSTATION;   /* PS3 / PS4 / PS5, and pads SDL cannot classify: the game's own prompts */
     }
 }
 
@@ -128,6 +143,17 @@ static int start(void)
     p_SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS5, "1");
     p_SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_STEAM, s_steam ? "1" : "0");
     p_SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
+    /* community button mappings for pads SDL has no built-in mapping for (SDL_GameControllerDB): sdl3\gamecontrollerdb.txt
+     * next to SDL3.dll's folder, or next to the exe; PAD_GAMEPAD_DB=<file> overrides, PAD_GAMEPAD_DB=0 skips it */
+    { char db[MAX_PATH + 64] = ""; const char* f = getenv("PAD_GAMEPAD_DB");
+      if (f && *f) { if (strcmp(f, "0") != 0) snprintf(db, sizeof db, "%s", f); }
+      else { char dir[MAX_PATH]; if (GetModuleFileNameA(NULL, dir, MAX_PATH)) { char* sl = strrchr(dir, '\\'); if (sl) *sl = 0;
+             snprintf(db, sizeof db, "%s\\gamecontrollerdb.txt", dir);
+             if (GetFileAttributesA(db) == INVALID_FILE_ATTRIBUTES) snprintf(db, sizeof db, "%s\\..\\..\\sdl3\\gamecontrollerdb.txt", dir); } }
+      if (db[0] && GetFileAttributesA(db) != INVALID_FILE_ATTRIBUTES) {
+          p_SDL_SetHint(SDL_HINT_GAMECONTROLLERCONFIG_FILE, db);
+          printf("[cellPad] SDL3 gamepad mappings from %s\n", db);
+      } }
     if (!p_SDL_Init(SDL_INIT_GAMEPAD)) {
         printf("[cellPad] SDL3 gamepad init failed: %s -- XInput only\n", p_SDL_GetError()); fflush(stdout); return 0;
     }
@@ -240,6 +266,7 @@ void pad_sdl3_update(void)
     for (int i = 0; i < s_nopen; i++) {
         OpenPad* o = &s_open[i];
         read_pad(o->gp, &snap[i]);
+        snap[i].type = pad_type_of(p_SDL_GetGamepadType(o->gp));
         /* PS3 motors hold their setting until the next SetActDirect; SDL rumble runs for a duration -> refresh it */
         const uint16_t r = s_rumble ? (uint16_t)s_rumble_req[i] : 0;
         if (r != o->rumble_sent || (r && now >= o->rumble_at)) {

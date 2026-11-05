@@ -5528,37 +5528,55 @@ static int tex_mips_on(void)
  * (g_input_kbm, cellPad.c) the upload of exactly that texture (size + format + checksum + full byte compare)
  * reads the KBM blocks instead of guest memory. The cached slot's checksum carries the mode, so a device
  * switch re-uploads it on the next bind = the prompts change on the next frame.
- * KBM_GLYPHS=0 never, 1 auto (default), 2 always KBM.
+ * KBM_GLYPHS (the Button Prompts setting): 1 auto (default: the device used last -- keyboard/mouse, or the family of the
+ * controller: Xbox / Nintendo / Steam Deck pads get the sets tools/make_prompt_sets.py draws, assets/<set>_icons.bin +
+ * <set>_prompts.bin), 0 the game's PlayStation prompts, 2 keyboard/mouse, 3 Xbox, 4 Nintendo, 5 Steam Deck.
  * =========================================================================*/
-extern volatile int g_input_kbm;   /* cellPad.c: 1 keyboard/mouse, 0 controller, -1 not known yet */
+extern volatile int g_input_kbm;        /* cellPad.c: 1 keyboard/mouse, 0 controller, -1 not known yet */
+extern volatile int g_input_pad_type;   /* cellPad.c: PAD_TYPE_* of the controller used last (0 PlayStation) */
 static int s_kg_state = 0, s_kg_cfg = -1;
-/* v197: a table -- the prompt-font atlas (kbm_icons.bin, v193) + the HUD button-prompt textures
- * (kbm_prompts.bin: "IFKBMIC2", u32 n, n x {w, h, fmt, nb, csum, orig L0, KBM L0}; tools/make_kbm_prompts.py) */
-typedef struct { u32 w, h, fmt, nb, csum; u8 *orig, *kbm; } KgEnt;
+/* Prompt sets: 0 = the game's own PlayStation prompts (the guest bytes), then one replacement image per set from
+ * assets/<set>_icons.bin ("IFKBMIC1": the 512x256 prompt-font atlas) + assets/<set>_prompts.bin ("IFKBMIC2", u32 n, n
+ * HUD textures), each entry {w, h, fmt, nb, csum, original L0, the set's L0}; tools/make_kbm_icons.py,
+ * make_kbm_prompts.py (keyboard/mouse) and make_prompt_sets.py (Xbox, Nintendo, Steam Deck). The same texture in several
+ * files shares one table entry (matched by size, format and checksum). */
+enum { KG_SET_NONE = 0, KG_SET_KBM = 1, KG_SET_XBOX = 2, KG_SET_NINTENDO = 3, KG_SET_STEAM = 4, KG_SETS = 5 };
+static const char* const kg_set_file[KG_SETS] = { "playstation", "kbm", "xbox", "nintendo", "steam" };
+/* xor-ed into the cached texture's checksum: a set switch re-uploads the texture on its next bind */
+static const u32 kg_set_tag[KG_SETS] = { 0, 0x4B424D31u, 0x58424F58u, 0x4E494E54u, 0x5354454Du };
+typedef struct { u32 w, h, fmt, nb, csum; u8 *orig, *alt[KG_SETS]; } KgEnt;
 #define KG_MAX 32
 static KgEnt s_kg[KG_MAX]; static int s_kg_n = 0;
-#define KG_CSUM_KBM 0x4B424D31u
-static int kg_add(FILE* f, const u32 h[5])
+static int kg_add(FILE* f, const u32 h[5], int set)
 {
-    if (s_kg_n >= KG_MAX || !h[3] || h[3] > (4u << 20)) return 0;
-    KgEnt* e = &s_kg[s_kg_n];
-    e->w = h[0]; e->h = h[1]; e->fmt = h[2]; e->nb = h[3]; e->csum = h[4];
-    e->orig = (u8*)malloc(e->nb); e->kbm = (u8*)malloc(e->nb);
-    if (!e->orig || !e->kbm || fread(e->orig, 1, e->nb, f) != e->nb || fread(e->kbm, 1, e->nb, f) != e->nb) {
-        free(e->orig); free(e->kbm); return 0; }
-    s_kg_n++; return 1;
+    if (!h[3] || h[3] > (4u << 20)) return 0;
+    KgEnt* e = NULL;
+    for (int i = 0; i < s_kg_n; i++)   /* the same texture, from another set's file */
+        if (s_kg[i].w == h[0] && s_kg[i].h == h[1] && s_kg[i].fmt == h[2] && s_kg[i].nb == h[3] && s_kg[i].csum == h[4]) { e = &s_kg[i]; break; }
+    if (!e) {
+        if (s_kg_n >= KG_MAX) return 0;
+        e = &s_kg[s_kg_n]; memset(e, 0, sizeof *e);
+        e->w = h[0]; e->h = h[1]; e->fmt = h[2]; e->nb = h[3]; e->csum = h[4];
+        e->orig = (u8*)malloc(e->nb);
+        if (!e->orig || fread(e->orig, 1, e->nb, f) != e->nb) { free(e->orig); e->orig = NULL; return 0; }
+        s_kg_n++;
+    } else if (fseek(f, (long)e->nb, SEEK_CUR) != 0) return 0;   /* the original bytes are already held */
+    u8* alt = (u8*)malloc(e->nb);
+    if (!alt || fread(alt, 1, e->nb, f) != e->nb) { free(alt); return 0; }
+    free(e->alt[set]); e->alt[set] = alt;
+    return 1;
 }
-static int kg_try(const char* path)
+static int kg_try(const char* path, int set)
 {
     FILE* f = fopen(path, "rb"); if (!f) return 0;
     char m[8]; u32 h[5]; int got = 0;
     if (fread(m, 1, 8, f) == 8) {
-        if (!memcmp(m, "IFKBMIC1", 8)) { if (fread(h, 4, 5, f) == 5) got += kg_add(f, h); }
+        if (!memcmp(m, "IFKBMIC1", 8)) { if (fread(h, 4, 5, f) == 5) got += kg_add(f, h, set); }
         else if (!memcmp(m, "IFKBMIC2", 8)) { u32 n = 0;
-            if (fread(&n, 4, 1, f) == 1) for (u32 i = 0; i < n && i < KG_MAX; i++) { if (fread(h, 4, 5, f) != 5 || !kg_add(f, h)) break; got++; } }
+            if (fread(&n, 4, 1, f) == 1) for (u32 i = 0; i < n && i < KG_MAX; i++) { if (fread(h, 4, 5, f) != 5 || !kg_add(f, h, set)) break; got++; } }
     }
     fclose(f);
-    if (got) fprintf(stderr, "[KBMGLYPH] v197 keyboard/mouse prompt textures loaded: %s (%d textures; KBM_GLYPHS=%d)%c", path, got, s_kg_cfg, 10);
+    if (got) fprintf(stderr, "[KBMGLYPH] prompt textures loaded: %s (%d textures, set %s; KBM_GLYPHS=%d)%c", path, got, kg_set_file[set], s_kg_cfg, 10);
     return got;
 }
 static int kg_ready(void)
@@ -5571,22 +5589,38 @@ static int kg_ready(void)
     if (n && n < MAX_PATH) {
         char* sl = strrchr(exe, '\\'); if (sl) *sl = 0;
         static const char* rel[] = { "\\assets\\", "\\..\\assets\\", "\\..\\..\\assets\\" };
-        static const char* fn[] = { "kbm_icons.bin", "kbm_prompts.bin" };
-        for (int k = 0; k < 2; k++)
-            for (int i = 0; i < 3; i++) {
-                char p2[MAX_PATH + 64]; snprintf(p2, sizeof p2, "%s%s%s", exe, rel[i], fn[k]);
-                if (kg_try(p2)) break;
-            }
+        static const char* fn[] = { "icons.bin", "prompts.bin" };
+        for (int set = 1; set < KG_SETS; set++)
+            for (int k = 0; k < 2; k++)
+                for (int i = 0; i < 3; i++) {
+                    char p2[MAX_PATH + 64]; snprintf(p2, sizeof p2, "%s%s%s_%s", exe, rel[i], kg_set_file[set], fn[k]);
+                    if (kg_try(p2, set)) break;
+                }
     }
     if (s_kg_n) { s_kg_state = 1; return 1; }
-    fprintf(stderr, "[KBMGLYPH] no assets\\kbm_icons.bin / kbm_prompts.bin -> controller prompts only%c", 10);
+    fprintf(stderr, "[KBMGLYPH] no assets\\<set>_icons.bin / <set>_prompts.bin (kbm, xbox, nintendo, steam) -> the game's own prompts only%c", 10);
     return 0;
 }
-extern volatile int g_ui_kbm_glyphs;   /* v194 settings menu: -1 env, 0 controller, 1 auto, 2 keyboard/mouse */
-static inline int kg_want_kbm(void)
+extern volatile int g_ui_kbm_glyphs;   /* v194 settings menu: -1 env, else the KBM_GLYPHS value */
+/* the prompt set the next texture upload should use; KG_SET_NONE = the game's own PlayStation prompts */
+static inline int kg_want_set(void)
 {
     const int c = g_ui_kbm_glyphs >= 0 ? g_ui_kbm_glyphs : s_kg_cfg;
-    return c == 2 || (c != 0 && g_input_kbm > 0);
+    switch (c) {
+    case 0: return KG_SET_NONE;
+    case 2: return KG_SET_KBM;
+    case 3: return KG_SET_XBOX;
+    case 4: return KG_SET_NINTENDO;
+    case 5: return KG_SET_STEAM;
+    default:   /* 1 = automatic: the device used last */
+        if (g_input_kbm > 0) return KG_SET_KBM;
+        switch (g_input_pad_type) {
+        case 1: return KG_SET_XBOX;
+        case 2: return KG_SET_NINTENDO;
+        case 3: return KG_SET_STEAM;
+        default: return KG_SET_NONE;
+        }
+    }
 }
 /* one of the replaced textures (by size/format/checksum of the guest bytes); 0 = none, else index + 1 */
 static inline int kg_hit(u32 w, u32 h, u32 basef, int cube, u32 cs)
@@ -5886,7 +5920,7 @@ static void tex_decode_d(void* dst, u32 dst_pitch, const u8* src, u32 w, u32 h, 
 }
 static int vp_upload_tex_slot_impl(u32 off, u32 w, u32 h, u32 fmt, int cube, u32 mips)
 {
-    const int _kg_k = kg_want_kbm();   /* v193: one read per call (bind check and stored checksum agree) */
+    const int _kg_k = kg_want_set();   /* v193: one read per call (bind check and stored checksum agree); 0 = the game's own prompts */
     /* TEX_BUDGET=<n>: cap texture uploads per frame. Off by default -- it was
      * tried against the TDR and does not help, because PERF shows the upload
      * path costing 0.01s for 775 calls. Kept because it is the right lever if a
@@ -5995,7 +6029,7 @@ static int vp_upload_tex_slot_impl(u32 off, u32 w, u32 h, u32 fmt, int cube, u32
             if (!tcs_take(i, c->off, nb, face_stride, basef == 0x81, &cs))   /* v228 TEXCS: precomputed this frame? */
                 cs = (basef == 0x81) ? tex_csum_dense(vm_base + c->off, nb)
                                      : tex_csum_faces(vm_base + c->off, nb, face_stride);
-            if (_kg_k && kg_hit(w, h, basef, cube, cs)) cs ^= KG_CSUM_KBM;   /* v193: KBM icons are a different image */
+            if (_kg_k && kg_hit(w, h, basef, cube, cs)) cs ^= kg_set_tag[_kg_k];   /* v193: a replaced prompt texture is another image per set */
             if (cs == c->csum) { c->used = 1; c->lru = s_tex_frame; tex_assoc_note(hh, i, assoc); return i; }
             slot = i; break;                      /* stale: fall through and redo */
         }
@@ -6169,12 +6203,12 @@ static int vp_upload_tex_slot_impl(u32 off, u32 w, u32 h, u32 fmt, int cube, u32
     if (_kg_k && dxt && !cube && basef == 0x88u && (w == 512u || w == 32u) && kg_ready()) {
         const u32 _nb = blkrow * blkrows;
         const int _e = kg_hit(w, h, basef, cube, tex_csum_faces(vm_base + off, _nb, 0)) - 1;
-        if (_e >= 0 && s_kg[_e].nb == _nb && memcmp(vm_base + off, s_kg[_e].orig, _nb) == 0) {
-            _kg_src = s_kg[_e].kbm;
-            static int _n = 0; if (_n < 16) { _n++; fprintf(stderr, "[KBMGLYPH] prompt texture %d (%ux%u) -> keyboard/mouse (tex 0x%08X)%c", _e, w, h, off, 10); }
+        if (_e >= 0 && s_kg[_e].nb == _nb && memcmp(vm_base + off, s_kg[_e].orig, _nb) == 0 && s_kg[_e].alt[_kg_k]) {
+            _kg_src = s_kg[_e].alt[_kg_k];
+            static int _n = 0; if (_n < 16) { _n++; fprintf(stderr, "[KBMGLYPH] prompt texture %d (%ux%u) -> %s (tex 0x%08X)%c", _e, w, h, kg_set_file[_kg_k], off, 10); }
         }
     }
-    { static int _was = -1; if (!_kg_k && _was == 1 && w == 512u && h == 256u && basef == 0x88u) {
+    { static int _was = -1; if (!_kg_k && _was > 0 && w == 512u && h == 256u && basef == 0x88u) {
         static int _n = 0; if ((_n < 4 && _n++ < 4)) fprintf(stderr, "[KBMGLYPH] prompt icons -> controller%c", 10); }
       if (w == 512u && h == 256u && basef == 0x88u) _was = _kg_k; }
     u32 _nlev = 1;
@@ -6696,7 +6730,7 @@ static int vp_upload_tex_slot_impl(u32 off, u32 w, u32 h, u32 fmt, int cube, u32
     { u32 nb = dxt ? (blkrow * blkrows) : (w * h * bpp);
       t->csum = ((fmt & 0x9F) == 0x81) ? tex_csum_dense(vm_base + off, nb)
                                        : tex_csum_faces(vm_base + off, nb, face_stride);
-      if (_kg_k && kg_hit(w, h, basef, cube, t->csum)) t->csum ^= KG_CSUM_KBM; }   /* v193: same rule as the bind check */
+      if (_kg_k && kg_hit(w, h, basef, cube, t->csum)) t->csum ^= kg_set_tag[_kg_k]; }   /* v193: same rule as the bind check */
     #undef TEX_CSUM
     return slot;
 }

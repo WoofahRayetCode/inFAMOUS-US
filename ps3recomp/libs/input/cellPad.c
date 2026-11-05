@@ -167,19 +167,71 @@ static int pad_host_window_focused(void)
     return pid == GetCurrentProcessId();
 }
 
-/* v150 KEYBOARD + MOUSE (PAD_KBM, default 1; 0 = the old key map below).
- *   W/A/S/D = left stick (walk), hold Shift = run (full deflection)
+/* v150 KEYBOARD + MOUSE (PAD_KBM, default 1; 0 = the old key map below). The defaults; every key is rebindable in
+ * controls.ini (kb_load below):
+ *   W/A/S/D = left stick (run), hold Shift = walk (PAD_KBM_WALK deflection)
  *   mouse   = right stick (camera), left click = R1 (shoot), right click = L1 (aim)
  *   Space = Cross (jump), F = Square, E = Triangle, C = Circle, R = R2, Q = L2,
- *   Ctrl = d-pad up (Precision), middle click = R3, V = L3, Enter = START, Tab = SELECT.
+ *   Ctrl = d-pad up (Precision), middle click = R3, V = L3, Esc = START (pause), Tab = SELECT (map).
+ *   In menus: Enter = Cross, Backspace = Circle, W/A/S/D and the arrow keys = d-pad.
  *   On the map, mouse motion / WASD pan and the mouse wheel zooms.
- *   Hold Alt to free the mouse pointer. (Esc still closes the window.)
+ *   Hold Alt to free the mouse pointer.
  * The pointer is hidden and re-centred while the game window has focus; mouse motion becomes a
  * right-stick deflection that decays over ~30 ms, with a small offset past the game's stick dead zone.
  * Tuning: PAD_MOUSE_SENS (default 6), PAD_MOUSE_INVERT_Y=1, PAD_MOUSE_DZ (default 22),
  * PAD_KBM_WALK (walk deflection 0..127, default 64). Merged into port 0 when a controller is present. */
 static int pad_kbm_on(void);
 static int pad_envi(const char* n, int d);
+/* controls.ini (next to settings.ini, the game's working folder): one "action=KEY" per line. KEY = a letter or digit,
+ * SPACE, ENTER, TAB, ESC, SHIFT, CTRL, ALT, BACKSPACE, UP, DOWN, LEFT, RIGHT, F1-F12, LMB, RMB, MMB, MOUSE4, MOUSE5,
+ * CAPSLOCK, INSERT, DELETE, HOME, END, PAGEUP, PAGEDOWN, or VK:<hex> (any Windows virtual-key code).
+ * tools/kbm_bindings.py reads the same file, so the drawn keyboard prompts follow it once the prompts are rebuilt. */
+#include <ctype.h>
+enum { KB_FORWARD, KB_BACK, KB_LEFT, KB_RIGHT, KB_JUMP, KB_SQUARE, KB_TRIANGLE, KB_CIRCLE, KB_L1, KB_R1, KB_L2, KB_R2,
+       KB_L3, KB_R3, KB_DUP, KB_SELECT, KB_START, KB_WALK, KB_FREE_MOUSE, KB_N };
+static const char* const s_kb_name[KB_N] = { "forward", "back", "left", "right", "jump", "melee", "triangle", "circle", "aim",
+                                             "fire", "l2", "r2", "l3", "r3", "precision", "select", "start", "walk", "free_mouse" };
+static int s_kb[KB_N] = { 'W', 'S', 'A', 'D', VK_SPACE, 'F', 'E', 'C', VK_RBUTTON, VK_LBUTTON, 'Q', 'R', 'V', VK_MBUTTON,
+                          VK_CONTROL, VK_TAB, VK_ESCAPE, VK_SHIFT, VK_MENU };
+static int kb_parse(const char* s)
+{
+    static const struct { const char* n; int vk; } named[] = {
+        { "SPACE", VK_SPACE }, { "ENTER", VK_RETURN }, { "RETURN", VK_RETURN }, { "TAB", VK_TAB }, { "ESC", VK_ESCAPE },
+        { "ESCAPE", VK_ESCAPE }, { "SHIFT", VK_SHIFT }, { "CTRL", VK_CONTROL }, { "CONTROL", VK_CONTROL }, { "ALT", VK_MENU },
+        { "BACKSPACE", VK_BACK }, { "UP", VK_UP }, { "DOWN", VK_DOWN }, { "LEFT", VK_LEFT }, { "RIGHT", VK_RIGHT },
+        { "LMB", VK_LBUTTON }, { "RMB", VK_RBUTTON }, { "MMB", VK_MBUTTON }, { "MOUSE4", VK_XBUTTON1 }, { "MOUSE5", VK_XBUTTON2 },
+        { "CAPSLOCK", VK_CAPITAL }, { "INSERT", VK_INSERT }, { "DELETE", VK_DELETE }, { "HOME", VK_HOME }, { "END", VK_END },
+        { "PAGEUP", VK_PRIOR }, { "PAGEDOWN", VK_NEXT } };
+    char u[32]; size_t n = 0;
+    while (s[n] && n < sizeof u - 1) { u[n] = (char)toupper((unsigned char)s[n]); n++; }
+    u[n] = 0;
+    if (n == 1 && ((u[0] >= 'A' && u[0] <= 'Z') || (u[0] >= '0' && u[0] <= '9'))) return u[0];
+    if (u[0] == 'F' && n >= 2 && n <= 3) { const int k = atoi(u + 1); if (k >= 1 && k <= 12) return VK_F1 + k - 1; }
+    if (!strncmp(u, "VK:", 3)) { const long v = strtol(u + 3, NULL, 16); if (v > 0 && v < 256) return (int)v; }
+    for (size_t i = 0; i < sizeof named / sizeof named[0]; i++) if (!strcmp(u, named[i].n)) return named[i].vk;
+    return 0;
+}
+static void kb_load(void)
+{
+    FILE* f = fopen("controls.ini", "r");
+    if (!f) return;
+    char line[128]; int n = 0;
+    while (fgets(line, sizeof line, f)) {
+        char* eq = strchr(line, '='); if (!eq || line[0] == ';' || line[0] == '#' || line[0] == '[') continue;
+        *eq = 0; char* v = eq + 1; v[strcspn(v, "\r\n")] = 0;
+        char* k = line; while (*k == ' ' || *k == '\t') k++;
+        for (char* c = k; *c; c++) { if (*c == ' ' || *c == '\t') { *c = 0; break; } *c = (char)tolower((unsigned char)*c); }
+        while (*v == ' ' || *v == '\t') v++;
+        for (int i = 0; i < KB_N; i++)
+            if (!strcmp(k, s_kb_name[i])) {
+                const int vk = kb_parse(v);
+                if (vk) { s_kb[i] = vk; n++; } else printf("[cellPad] controls.ini: unknown key '%s' for %s\n", v, k);
+                break;
+            }
+    }
+    fclose(f);
+    printf("[cellPad] controls.ini: %d binding(s) loaded\n", n); fflush(stdout);
+}
 /* v193: which device the player used last -- read by the renderer to show keyboard/mouse or controller button
  * prompts (rsx_d3d12_backend.c KBM GLYPHS). 1 = keyboard/mouse, 0 = controller, -1 = nothing yet. */
 volatile int g_input_kbm = -1;
@@ -188,6 +240,17 @@ static void pad_note_device(int kbm)
     if (g_input_kbm != kbm) {
         g_input_kbm = kbm;
         static int n = 0; if ((n < 40 && n++ < 40)) { printf("[cellPad] v193 input device -> %s (button prompts follow)\n", kbm ? "keyboard/mouse" : "controller"); fflush(stdout); }
+    }
+}
+/* The family of the controller used last (PAD_TYPE_*, cellPad.h): with automatic button prompts the renderer shows
+ * Xbox / Nintendo / Steam Deck glyphs for those pads and the game's PlayStation glyphs for everything else. */
+volatile int g_input_pad_type = PAD_TYPE_PLAYSTATION;
+static void pad_note_pad_type(int type)
+{
+    if (g_input_pad_type != type) {
+        static const char* const names[4] = { "PlayStation", "Xbox", "Nintendo", "Steam Deck" };
+        g_input_pad_type = type;
+        printf("[cellPad] controller family -> %s (button prompts follow)\n", names[type >= 0 && type < 4 ? type : 0]); fflush(stdout);
     }
 }
 volatile int g_pad_mouse_captured = 0;   /* read by the D3D12 window proc (WM_SETCURSOR) */
@@ -234,11 +297,19 @@ static int pad_mouse_direct(void)
 static volatile LONG s_rs_reads = 0, s_rs_n73 = 0, s_rs_n85 = 0;
 static volatile LONG s_rs_kind[8];
 static volatile int s_kbm_lstick_keys = 0;      /* WASD is moving the left stick this poll (pad_poll_kbm) */
+/* Guest addresses in this file differ between releases (see infamous-recomp/infamous_region.h). */
+#ifdef INFAMOUS_REGION_US
+#define PAD_TITLE_TOC 0x0078BF78u
+#define PAD_RSTICK_CAM_SITE 0x73FCCu
+#else
+#define PAD_TITLE_TOC 0x0078BFC0u
+#define PAD_RSTICK_CAM_SITE 0x73FECu
+#endif
 void ps3_pad_rstick_read(u32 site, u32 which, u32 kind)
 {
     if (!which) return;
     InterlockedIncrement(&s_rs_reads);
-    if (site == 0x73FECu) InterlockedIncrement(&s_rs_n73);
+    if (site == PAD_RSTICK_CAM_SITE) InterlockedIncrement(&s_rs_n73);
     else { InterlockedIncrement(&s_rs_n85); InterlockedIncrement(&s_rs_kind[kind < 7u ? kind : 7u]); }
 }
 static void pad_mouse_lstick(u32 ctrl, long dx, long dy, double dt, int captured)
@@ -343,7 +414,7 @@ void ps3_pad_mouse_inject(u32 ctrl)
     { static int s_md = -1; static unsigned long long s_mt = 0; static int s_n = 0; static int s_inv_prev = -1;
       if (s_md < 0) s_md = pad_envi("PAD_MOUSE_DIAG", 1);
       if (s_md) {
-          const u32 pool = vm_read32(0x0078BFC0u - 0x7DC0u), g = pool ? vm_read32(pool - 0x7FB4u) : 0;
+          const u32 pool = vm_read32(PAD_TITLE_TOC - 0x7DC0u), g = pool ? vm_read32(pool - 0x7FB4u) : 0;
           const int inv = g ? (int)((vm_read8(g + 0xB0) ? 1 : 0) | (vm_read8(g + 0xB1) ? 2 : 0)) : -1;
           union { u32 u; float f; } px, py; px.u = vm_read32(ctrl + 0x10); py.u = vm_read32(ctrl + 0x14);
           const unsigned long long now = GetTickCount64();
@@ -403,7 +474,7 @@ static void pad_poll_kbm(int merge)
     static float s_mx = 0.0f, s_my = 0.0f;
     static int s_sens = -1, s_inv = 0, s_dz = 0, s_walk = 0;
     if (s_sens < 0) { s_sens = pad_envi("PAD_MOUSE_SENS", 6); s_inv = pad_envi("PAD_MOUSE_INVERT_Y", 0);
-                      s_dz = pad_envi("PAD_MOUSE_DZ", 22); s_walk = pad_envi("PAD_KBM_WALK", 64); }
+                      s_dz = pad_envi("PAD_MOUSE_DZ", 22); s_walk = pad_envi("PAD_KBM_WALK", 64); kb_load(); }
     const int focused = pad_host_window_focused();
     const long raw_dx = InterlockedExchange(&g_pad_raw_mdx, 0), raw_dy = InterlockedExchange(&g_pad_raw_mdy, 0);
     const long raw_wheel = InterlockedExchange(&g_pad_raw_wheel, 0);
@@ -425,7 +496,7 @@ static void pad_poll_kbm(int merge)
      * recentred, mouse buttons not mapped) until Esc again or a left click in the game window. */
     static int s_menu_free = 0, s_esc_prev = 0, s_lmb_block = 0;
     {
-        const int esc = KD(VK_ESCAPE);
+        const int esc = KD(s_kb[KB_START]);
         extern volatile int g_uiov_menu_open;   /* v194: Esc belongs to the settings menu while it is open */
         if (esc && !s_esc_prev && !g_uiov_menu_open) s_menu_free = !s_menu_free;
         s_esc_prev = esc;
@@ -450,18 +521,18 @@ static void pad_poll_kbm(int merge)
      * never pauses, the pending state expires instead of hijacking normal mouse-look. */
     static int s_map_mode = 0, s_tab_prev = 0;
     static unsigned long long s_map_pending_until = 0;
-    const int tab_now = KD(VK_TAB);
+    const int tab_now = KD(s_kb[KB_SELECT]);
     const unsigned long long input_now = GetTickCount64();
     if (tab_now && !s_tab_prev) {
         s_map_mode = !s_map_mode;
         s_map_pending_until = s_map_mode ? input_now + 1500 : 0;
     }
     s_tab_prev = tab_now;
-    if (s_map_mode && (KD('C') || KD(VK_ESCAPE) || KD(VK_BACK))) s_map_mode = 0;
+    if (s_map_mode && (KD(s_kb[KB_CIRCLE]) || KD(s_kb[KB_START]) || KD(VK_BACK))) s_map_mode = 0;
     if (s_map_mode && !paused_now && input_now >= s_map_pending_until) s_map_mode = 0;
     const int map_now = s_map_mode && (paused_now || input_now < s_map_pending_until);
     s_pad_kbm_map_active = map_now;
-    static const int mk_vk[5] = { 'W', 'A', 'S', 'D', VK_RETURN };
+    const int mk_vk[5] = { s_kb[KB_FORWARD], s_kb[KB_LEFT], s_kb[KB_BACK], s_kb[KB_RIGHT], VK_RETURN };
     for (int i = 0; i < 5; i++) {
         if (!KD(mk_vk[i])) s_mk_mode[i] = 0;
         else if (!s_mk_mode[i]) s_mk_mode[i] = (paused_now && !map_now) ? 2 : 1;
@@ -475,23 +546,23 @@ static void pad_poll_kbm(int merge)
     if (MK_MENU(3)) btns |= CELL_PAD_CTRL_RIGHT;
     if (MK_MENU(4)) btns |= CELL_PAD_CTRL_CROSS;
     if (paused_now && KD(VK_BACK)) btns |= CELL_PAD_CTRL_CIRCLE;
-    if (KD(VK_CONTROL)) btns |= CELL_PAD_CTRL_UP;       /* Precision power/mode */
+    if (KD(s_kb[KB_DUP])) btns |= CELL_PAD_CTRL_UP;     /* Precision power/mode */
     if (paused_now && !map_now && KD(VK_UP)) btns |= CELL_PAD_CTRL_UP; /* menu navigation only */
     if (KD(VK_DOWN))    btns |= CELL_PAD_CTRL_DOWN;
     if (KD(VK_LEFT))    btns |= CELL_PAD_CTRL_LEFT;
     if (KD(VK_RIGHT))   btns |= CELL_PAD_CTRL_RIGHT;
-    if (KD(VK_SPACE))   btns |= CELL_PAD_CTRL_CROSS;
-    if (KD('C'))         btns |= CELL_PAD_CTRL_CIRCLE;
-    if (KD('F'))        btns |= CELL_PAD_CTRL_SQUARE;
-    if (KD('E'))        btns |= CELL_PAD_CTRL_TRIANGLE;
-    if (!s_menu_free && KD(VK_RBUTTON)) btns |= CELL_PAD_CTRL_L1;
-    if (!s_menu_free && !s_lmb_block && KD(VK_LBUTTON)) btns |= CELL_PAD_CTRL_R1;
-    if (KD('Q'))        btns |= CELL_PAD_CTRL_L2;
-    if (KD('R'))        btns |= CELL_PAD_CTRL_R2;
-    if (KD('V'))        btns |= CELL_PAD_CTRL_L3;
-    if (!s_menu_free && KD(VK_MBUTTON)) btns |= CELL_PAD_CTRL_R3;
-    if (MK_GAME(4) || KD(VK_ESCAPE)) btns |= CELL_PAD_CTRL_START;   /* v155: Esc = Start (pause) */
-    if (KD(VK_TAB))     btns |= CELL_PAD_CTRL_SELECT;
+    if (KD(s_kb[KB_JUMP]))     btns |= CELL_PAD_CTRL_CROSS;
+    if (KD(s_kb[KB_CIRCLE]))   btns |= CELL_PAD_CTRL_CIRCLE;
+    if (KD(s_kb[KB_SQUARE]))   btns |= CELL_PAD_CTRL_SQUARE;
+    if (KD(s_kb[KB_TRIANGLE])) btns |= CELL_PAD_CTRL_TRIANGLE;
+    if (!s_menu_free && KD(s_kb[KB_L1])) btns |= CELL_PAD_CTRL_L1;
+    if (!s_menu_free && !s_lmb_block && KD(s_kb[KB_R1])) btns |= CELL_PAD_CTRL_R1;
+    if (KD(s_kb[KB_L2]))       btns |= CELL_PAD_CTRL_L2;
+    if (KD(s_kb[KB_R2]))       btns |= CELL_PAD_CTRL_R2;
+    if (KD(s_kb[KB_L3]))       btns |= CELL_PAD_CTRL_L3;
+    if (!s_menu_free && KD(s_kb[KB_R3])) btns |= CELL_PAD_CTRL_R3;
+    if (MK_GAME(4) || KD(s_kb[KB_START])) btns |= CELL_PAD_CTRL_START;   /* v155: Esc = Start (pause) */
+    if (KD(s_kb[KB_SELECT]))   btns |= CELL_PAD_CTRL_SELECT;
     /* left stick */
     float lx = 0.0f, ly = 0.0f;
     if (MK_GAME(1)) lx -= 1.0f;
@@ -503,12 +574,12 @@ static void pad_poll_kbm(int merge)
     const int keyboard_moving = (lx != 0.0f || ly != 0.0f);
     s_kbm_lstick_keys = keyboard_moving;   /* v236 */
     if (keyboard_moving) {
-        const float mag = KD(VK_SHIFT) ? 127.0f : (float)s_walk;
+        const float mag = KD(s_kb[KB_WALK]) ? (float)s_walk : 127.0f;   /* run; hold the walk key for PAD_KBM_WALK */
         const float n = (lx != 0.0f && ly != 0.0f) ? 0.70710678f : 1.0f;
         lx *= mag * n; ly *= mag * n;
     }
     /* mouse -> right stick */
-    const int alt = KD(VK_MENU);
+    const int alt = KD(s_kb[KB_FREE_MOUSE]);
 #undef KD
     HWND fg = GetForegroundWindow();
     int have_mouse = 0;
@@ -721,8 +792,8 @@ static void pad_poll_xinput(void)
         /* v193: controller activity -> controller prompts (sticks past ~37 %, so drift does not flip it) */
         { const int st = (gp->sThumbLX > 12000 || gp->sThumbLX < -12000 || gp->sThumbLY > 12000 || gp->sThumbLY < -12000 ||
                           gp->sThumbRX > 12000 || gp->sThumbRX < -12000 || gp->sThumbRY > 12000 || gp->sThumbRY < -12000);
-          if (btns || st) pad_note_device(0);
-          else if (g_input_kbm < 0) pad_note_device(0); }
+          if (btns || st) { pad_note_device(0); pad_note_pad_type(PAD_TYPE_XBOX); }
+          else if (g_input_kbm < 0) { pad_note_device(0); pad_note_pad_type(PAD_TYPE_XBOX); } }
 
         /* Analog sticks. PS3 Y axis is inverted vs XInput (up = 0). Reflect about
          * 128 (256 - x), NOT 255 - x: the latter turns a centered stick into 127,
@@ -788,8 +859,8 @@ static void pad_merge_sdl3(void)
         h->press_l1 = (b & CELL_PAD_CTRL_L1) ? 255 : 0;             h->press_r1 = (b & CELL_PAD_CTRL_R1) ? 255 : 0;
         /* controller activity -> controller prompts (sticks past ~37 %, like the XInput path) */
         const int moved = p->lx < 80 || p->lx > 176 || p->ly < 80 || p->ly > 176 || p->rx < 80 || p->rx > 176 || p->ry < 80 || p->ry > 176;
-        if (b || moved) pad_note_device(0);
-        else if (g_input_kbm < 0) pad_note_device(0);
+        if (b || moved) { pad_note_device(0); pad_note_pad_type(p->type); }
+        else if (g_input_kbm < 0) { pad_note_device(0); pad_note_pad_type(p->type); }
         s_sdl_slot[i] = k++;
     }
 }
