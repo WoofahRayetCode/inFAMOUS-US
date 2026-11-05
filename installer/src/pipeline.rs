@@ -301,6 +301,7 @@ pub fn apply_lock(
     m: &Manifest,
     root: &Path,
     installer_dir: &Path,
+    region: Option<&Path>,
     lock: &Lock,
     tolerate: &[String],
 ) -> Result<()> {
@@ -347,7 +348,11 @@ pub fn apply_lock(
                 } else {
                     Vec::new()
                 };
-                let pp = patch_path(installer_dir, &e.path);
+                // A release's own patch, or else the patch every release shares.
+                let pp = region
+                    .map(|d| patch_path(d, &e.path))
+                    .filter(|p| p.is_file())
+                    .unwrap_or_else(|| patch_path(installer_dir, &e.path));
                 let patch = fs::read(&pp).ctx(|| format!("reading {}", pp.display()))?;
                 let new = diff::apply_patch(&old, &patch)
                     .map_err(|x| util::Error(format!("{}: {x}", pp.display())))?;

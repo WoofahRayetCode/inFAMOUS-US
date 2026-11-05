@@ -10,7 +10,13 @@
 
 use crate::bail;
 use crate::util::{Ctx, Result};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+/// `installer/regions/<title id>`, when this release has its own lock and patches.
+pub fn region_dir(installer_dir: &Path, title_id: &str) -> Option<PathBuf> {
+    let dir = installer_dir.join("regions").join(title_id);
+    dir.join("generated.lock").is_file().then_some(dir)
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Entry {

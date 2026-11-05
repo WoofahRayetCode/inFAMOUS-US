@@ -4,6 +4,7 @@
 *.ps1 text eol=crlf
 # Applied to the generated files byte for byte: keep them exactly as written
 installer/patches/** -text
+installer/regions/** -text
 installer/generated.lock -text
 *.profdata binary
 *.png binary

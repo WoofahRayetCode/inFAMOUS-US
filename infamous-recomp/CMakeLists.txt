@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.20)
 project(inFamousRecomp
     VERSION 0.1.0
     LANGUAGES C CXX
-    DESCRIPTION "inFamous (BCES00220) static recompilation project"
+    DESCRIPTION "inFamous (BCES00220 / BCUS98119) static recompilation project"
 )
 
 # ---------------------------------------------------------------------------
@@ -45,6 +45,16 @@ if(PORT_SCRUB_PRIVATE AND EXISTS "${_scrub_root}/.installer"
     endforeach()
     if(_scrub_removed GREATER 0)
         message(STATUS "Removed ${_scrub_removed} obsolete file(s) from older setups")
+    endif()
+endif()
+
+# Release of the linked dump: the US executable's functions have other addresses (infamous_region.h).
+set(_region_sfo "${CMAKE_CURRENT_SOURCE_DIR}/../Infamous (Europe) (Fr,De,Es,It,Nl)/PS3_GAME/PARAM.SFO")
+if(EXISTS "${_region_sfo}")
+    file(STRINGS "${_region_sfo}" _region_id REGEX "BCUS98119")
+    if(_region_id)
+        add_compile_definitions(INFAMOUS_REGION_US=1)
+        message(STATUS "Game release: US (BCUS98119)")
     endif()
 endif()
 

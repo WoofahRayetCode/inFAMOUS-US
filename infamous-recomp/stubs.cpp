@@ -18,6 +18,7 @@
 #include <cmath>
 #include <string>
 
+#include "infamous_region.h"   /* before ppu_recomp.h: renames func_ for this release */
 #include "ppu_recomp.h"
 /* v237B ADAPT_LOD: adaptive draw-distance factor (infamous_clock_probe.h writes it, lodx_v231.h reads it; 1 = off) */
 extern "C" { volatile float g_v237_lodf = 1.0f; }
@@ -160,7 +161,7 @@ struct inf_mbi { void* base; void* abase; unsigned long aprot; unsigned short pa
 extern "C" __declspec(dllimport) size_t __stdcall VirtualQuery(const void*, inf_mbi*, size_t);
 
 static const uint32_t PM_FN_SETTINGS = 0x00FF0000u, PM_FN_QUIT = 0x00FF0010u, PM_FN_TRIM = 0x00FF0020u;
-static const uint32_t PM_TOC = 0x0078BFC0u;
+static const uint32_t PM_TOC = INF_TITLE_TOC;
 static const uint32_t PM_OID_SETTINGS = 0x0002094Du, PM_OID_QUIT = 0x00019F4Cu;
 
 static void pm_native_settings(ppu_context* ctx) { g_uiov_request = 1; std::fprintf(stderr, "[pausemenu] Settings\n"); ctx->gpr[3] = 0; }
@@ -211,7 +212,13 @@ static bool pm_match(uint32_t ea, const uint32_t* w, int n)
 }
 static void pm_write(uint32_t ea, const uint32_t* w, int n) { for (int i = 0; i < n; i++) vm_write32(ea + 4u * i, w[i]); }
 
-static const uint32_t PM_ANCHOR_W[] = { 0x01040400u, 0x00019F4Cu, 0x70000000u, 0x3A0B0000u, 0x43000014u, 0x38000000u, 0x00000000u, 0x0077C170u, 0x4200012Cu };
+/* Word 7 is an OPD in the EBOOT (European 0x0077C170), so it is left out of the match on other releases. */
+#ifdef INFAMOUS_REGION_US
+#define PM_ANCHOR_OPD W_
+#else
+#define PM_ANCHOR_OPD 0x0077C170u
+#endif
+static const uint32_t PM_ANCHOR_W[] = { 0x01040400u, 0x00019F4Cu, 0x70000000u, 0x3A0B0000u, 0x43000014u, 0x38000000u, 0x00000000u, PM_ANCHOR_OPD, 0x4200012Cu };
 static const uint8_t  PM_ANCHOR_B[16] = { 0x01,0x04,0x04,0x00, 0x00,0x01,0x9F,0x4C, 0x70,0x00,0x00,0x00, 0x3A,0x0B,0x00,0x00 };
 
 static bool pm_patch_script(uint32_t A)
@@ -587,7 +594,7 @@ extern "C" void infamous_anim_lod_note(ppu_context* ctx)
         std::fprintf(stderr, "\n"); } }
     /* v218: [0] = the job's parameter block (per-frame 0x48CFxxxx command stream), [4] = its size in 16-byte units
      * (perf217: 0x30 / 0x40 ...). Only calls from the animation kick func_000282C8 (lr 0x28554) count. */
-    if ((uint32_t)ctx->lr != 0x00028554u) return;
+    if ((uint32_t)ctx->lr != INF_ANIM_KICK_LR) return;
     const uint32_t szc = vm_read32(jo + 4);
     if (!szc || szc > 0x1000u) return;
     if (AlEnt* e = al_find(jo - 0x684u, true)) {

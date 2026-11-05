@@ -11,7 +11,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from kbm_glyphs_dxt import dxt5_decode, dxt5_encode, tex_csum
 from kbm_glyphs_draw import build
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-orig = open(os.path.join(ROOT, '_xfer', 'bak_v189', 'font_icons_l0.bin'), 'rb').read()[:131072]
+# Level 0 of font_icons_00.dds: assets/font_icons_l0.bin is what tools/dump_icon_tex.py (the installer's kbm-icons
+# step) writes from the player's own game; the _xfer path is the maintainer's original copy.
+_src = next((p for p in (os.path.join(ROOT, 'assets', 'font_icons_l0.bin'),
+                         os.path.join(ROOT, '_xfer', 'bak_v189', 'font_icons_l0.bin')) if os.path.isfile(p)), None)
+if not _src:
+    raise SystemExit('make_kbm_icons: assets/font_icons_l0.bin not found (run tools/dump_icon_tex.py first)')
+orig = open(_src, 'rb').read()[:131072]
 vis = dxt5_decode(orig, 512, 256)[::-1]
 kbm = build(vis)
 enc = dxt5_encode(np.ascontiguousarray(kbm[::-1]))

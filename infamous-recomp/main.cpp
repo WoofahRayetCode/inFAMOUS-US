@@ -33,6 +33,7 @@
 #ifndef _WIN32
 #include <sys/mman.h>
 #endif
+#include "infamous_region.h"
 #include "ppu_recomp.h"
 
 /* The Win32 names -- Sleep, GetTickCount64, CreateThread, InterlockedIncrement,
@@ -199,7 +200,7 @@ static DWORD WINAPI frame_clock(LPVOID)
         SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
 #endif
     const char* title = getenv("PS3_TITLE");
-    if (!title || !*title) title = "inFamous (BCES00220)";
+    if (!title || !*title) title = "inFamous (" INF_RELEASE_NAME ")";
 
     int rsx_ok = (rsx_backend_init(WINDOW_WIDTH, WINDOW_HEIGHT, title) == 0);
     fprintf(stderr, "[rsx] %s backend init %s\n", RSX_BACKEND_NAME,

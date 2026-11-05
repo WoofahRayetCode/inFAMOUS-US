@@ -347,7 +347,7 @@ fn eboot_hash_check(s: &Session, elf: &Path, lock: Option<&lock::Lock>) -> Resul
         expected.push(e);
     }
     if !expected.is_empty() && !expected.contains(&sha) {
-        let msg = "this EBOOT.elf is not the version the port was made from (expected the European release BCES00220, v1.00 disc executable)";
+        let msg = "this EBOOT.elf is not a version the port supports (expected the v1.00 disc executable of BCES00220 or BCUS98119)";
         if !s.o.force {
             bail!("{msg}.\n    --force tries anyway; expect the patch step to fail.");
         }
@@ -359,7 +359,18 @@ fn eboot_hash_check(s: &Session, elf: &Path, lock: Option<&lock::Lock>) -> Resul
 fn cmd_install(s: &Session) -> Result<()> {
     println!("{} PC port installer", s.m.game_title);
     println!("Checkout: {}", s.root.display());
-    let lock = lock::Lock::load(&s.installer_dir.join("generated.lock"))?;
+
+    util::heading("Game files");
+    let g = s.game()?;
+    s.check_title(&g)?;
+
+    // A release with its own executable has its own lock and PPU patches (installer/regions).
+    let region = lock::region_dir(&s.installer_dir, g.title_id());
+    let lock_file = region
+        .as_deref()
+        .unwrap_or(&s.installer_dir)
+        .join("generated.lock");
+    let lock = lock::Lock::load(&lock_file)?;
     if lock.is_none() {
         bail!(
             "installer/generated.lock is missing, so there is no patch set for this checkout.\n    \
@@ -367,10 +378,6 @@ fn cmd_install(s: &Session) -> Result<()> {
         );
     }
     let lock = lock.unwrap();
-
-    util::heading("Game files");
-    let g = s.game()?;
-    s.check_title(&g)?;
 
     // A tree whose generated files are already final (the maintainer's own tree, or an earlier
     // install that finished) only needs building.
@@ -442,7 +449,14 @@ fn cmd_install(s: &Session) -> Result<()> {
                 .filter(|st| failed.contains(&st.id))
                 .flat_map(|st| st.outputs.clone())
                 .collect();
-        pipeline::apply_lock(&s.m, &s.root, &s.installer_dir, &lock, &tolerate)?;
+        pipeline::apply_lock(
+            &s.m,
+            &s.root,
+            &s.installer_dir,
+            region.as_deref(),
+            &lock,
+            &tolerate,
+        )?;
         let state_path = s.root.join(".installer").join("state");
         let mut st = lock::State::load(&state_path);
         st.applied = true;
@@ -623,7 +637,12 @@ fn cmd_update(s: &Session) -> Result<()> {
     // Rebuild with the (possibly new) manifest and patch set. Regenerate only if the patch set's
     // results are no longer what is on disk; files that come out identical keep their timestamps.
     let m = Manifest::load(&s.installer_dir.join("infamous.toml"))?;
-    let lock = lock::Lock::load(&s.installer_dir.join("generated.lock"))?
+    let lock_dir = s
+        .game()
+        .ok()
+        .and_then(|g| lock::region_dir(&s.installer_dir, g.title_id()))
+        .unwrap_or_else(|| s.installer_dir.clone());
+    let lock = lock::Lock::load(&lock_dir.join("generated.lock"))?
         .ctx(|| "the update has no installer/generated.lock")?;
     let regen = !pipeline::lock_satisfied(&s.root, &lock)?;
     if regen {
@@ -763,6 +782,14 @@ fn default_build_jobs() -> usize {
     let cpus = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
+    // INFAMOUS_BUILD_JOBS=<n>: a value measured for this machine; `Update inFamous.cmd` passes no --build-jobs.
+    if let Some(n) = std::env::var("INFAMOUS_BUILD_JOBS")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|&n| n >= 1)
+    {
+        return n.min(cpus.max(1));
+    }
     match util::total_ram_bytes() {
         Some(r) => ((r / (4 << 30)) as usize).clamp(1, cpus.min(8)),
         None => 4.min(cpus),

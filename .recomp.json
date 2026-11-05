@@ -18,5 +18,5 @@
       "link": "https://github.com/whompay"
     }
   ],
-  "notes": "Native Windows port built from the player's own European BCES00220 disc dump; no game code or data is distributed."
+  "notes": "Native Windows port built from the player's own European BCES00220 or US BCUS98119 (experimental) disc dump; no game code or data is distributed."
 }

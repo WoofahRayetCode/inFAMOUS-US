@@ -5,7 +5,7 @@
 > Forks are not supported, and bugs from forks won't be fixed.
 
 An unofficial native Windows port of **inFamous** (PlayStation 3, 2009, European
-release `BCES00220`). The game's PowerPC (PPU) and SPU code is statically
+release `BCES00220`, with experimental support for the US release `BCUS98119`). The game's PowerPC (PPU) and SPU code is statically
 recompiled to x86-64 C/C++ with [ps3recomp](https://github.com/sp00nznet/ps3recomp),
 so it runs as a normal Windows program rather than under an emulator.
 
@@ -35,7 +35,7 @@ Setup need one run of the new Setup on the same folder first.
 
 ## Requirements
 
-- Your own inFamous disc dump, European release (`BCES00220`).
+- Your own inFamous disc dump: European (`BCES00220`) or US (`BCUS98119`, experimental).
 - Windows 10 or 11 (64-bit) and a GPU with Direct3D 12 support.
 - A CPU with SSE4.1 (2008 or newer). On CPUs without AVX2 (Intel before 2013, Pentium/Celeron
   without AVX, AMD before 2015) Setup builds a slower compatibility version automatically.
@@ -68,6 +68,33 @@ Run **inFamous** (the shortcut Setup made). It opens a small options window firs
 (vsync, frame cap, resolution, language and more, saved to `settings.ini`);
 **Play** starts the game. The same settings are in the game's pause menu under
 **Settings**. Controllers work as on the console, and keyboard and mouse are supported.
+
+### Controls and button prompts
+
+Xbox pads (and Steam Input's virtual pads) work through XInput; DualShock 4, DualSense, Switch Pro, Joy-Con,
+Steam Controller and most other pads work through SDL3, with the community mappings in
+`sdl3/gamecontrollerdb.txt` for pads SDL does not know by itself. **Button Prompts** (in the launcher and in the
+Settings menu) is *Automatic* by default: the prompts follow the device you used last -- the game's own
+PlayStation glyphs, Xbox, Nintendo or Steam Deck glyphs drawn in the same style, or the keyboard and mouse
+keys -- and can be fixed to any one of them.
+
+Keyboard and mouse defaults (every key can be changed in `controls.ini` next to `settings.ini`, one
+`action=KEY` per line; run `Update inFamous.cmd` afterwards so the drawn key prompts follow):
+
+| Action | Key | Action | Key |
+|---|---|---|---|
+| Move (run) / walk | W A S D / hold Shift | Camera | Mouse |
+| Jump (Cross) | Space | Melee (Square) | F |
+| Triangle | E | Circle | C |
+| Aim (L1) | Right mouse | Fire (R1) | Left mouse |
+| L2 / R2 | Q / R | L3 / R3 | V / Middle mouse |
+| Precision (d-pad up) | Ctrl | Map (Select) | Tab |
+| Pause (Start) | Esc | Free the mouse pointer | hold Alt |
+
+Actions: `forward back left right jump melee triangle circle aim fire l2 r2 l3 r3 precision select start walk
+free_mouse`. Keys: a letter or digit, `SPACE`, `ENTER`, `TAB`, `ESC`, `SHIFT`, `CTRL`, `ALT`, `BACKSPACE`,
+`UP`/`DOWN`/`LEFT`/`RIGHT`, `F1`-`F12`, `LMB`/`RMB`/`MMB`/`MOUSE4`/`MOUSE5`, or `VK:<hex>`. In menus Enter
+selects, Backspace goes back, and W/A/S/D or the arrow keys move the cursor.
 
 **F10** opens the in-game trainer: God Mode, Infinite Energy, Refill Health,
 Max Health x2/x5/x10, Add XP, Karma +/-, Kill Enemies / Civilians, Super Speed

@@ -547,7 +547,12 @@ const LwcSitePoll& lwc_site_poll_cfg()
     static const LwcSitePoll cfg = [] {
         LwcSitePoll c;
         const char* e = getenv("LWCOND_SITE_POLL");
+        #ifdef INFAMOUS_REGION_US
+        /* The same call site in the US executable; the launcher's European value is not a site there. */
+        if (!e || !strcmp(e, "524824:16")) e = "52493C:16";
+#else
         if (!e) e = "524824:16";
+#endif
         const char* q = e;
         while (*q && c.n < 8) {
             char* end = nullptr;

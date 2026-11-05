@@ -8,10 +8,19 @@ Blobs are found by their header: +0x10 code size, +0x14 total size, +0x1C == 0x4
 load time; the last 16 bytes are writable data). Function starts: 0x30, header entries (+0x18/+0x20/+0x24), observed
 runtime entry offsets, brsl targets, the instruction after each unconditional return/jump, and every direct branch
 target that leaves a function (fixpoint)."""
+import hashlib
 import sys, os, json, struct
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from spu_disasm import disassemble_spu
 import spu_lifter as L
+
+# The policy module's offset differs between releases; the bytes do not (hash = pm_wwsjob.raw).
+PM_SHA256 = '2fedf78bc38dd708d5e950c220baec9e987db677cf776614fc4bdf5e289d1b56'
+def pm_shift(eb):
+    for shift in (0, -0x500):   # BCES00220, BCUS98119
+        if hashlib.sha256(eb[0x68CD80 + shift:0x68CD80 + shift + 0x2D80]).hexdigest() == PM_SHA256:
+            return shift
+    raise SystemExit('plug_lift: no known policy module in this EBOOT')
 
 def find_blobs(eb):
     w = lambda a: struct.unpack('>I', eb[a:a+4])[0]
@@ -71,11 +80,11 @@ def main():
             if 0x30 <= e < dend and e % 4 == 0: st.add(e)
         for o in obs.get(str(k), []):
             if 0x30 <= o < dend: st.add(o)
-        items.append(dict(name='blob', file=bl['file'], raw=raw, org=0, lo=0x30, hi=dend, hdr=0x28, fixed=False, starts=st,
+        items.append(dict(name='blob', file=bl['file'] - pm_shift(eb), raw=raw, org=0, lo=0x30, hi=dend, hdr=0x28, fixed=False, starts=st,
                           img=raw[:dend]))
     for name, org, srcd, extra in FIXED:
         if srcd[0] == 'eboot':
-            n = srcd[2]; raw = eb[srcd[1]:srcd[1] + n + 0x20]       # +0x20: the 32-byte hash window may run past the end
+            n = srcd[2]; raw = eb[srcd[1] + pm_shift(eb):srcd[1] + pm_shift(eb) + n + 0x20]       # +0x20: the 32-byte hash window may run past the end
         else:
             raw = CTX_RESTORE if srcd[0] == 'const' else CTX_SAVE; n = len(raw)
         items.append(dict(name=name, file=srcd[1] or 0, raw=raw, org=org, lo=org, hi=org + n, hdr=0, fixed=True,

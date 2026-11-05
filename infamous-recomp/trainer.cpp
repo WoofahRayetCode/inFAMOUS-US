@@ -12,6 +12,7 @@
  * Threading: the overlay calls row/status/hud/change on the render thread; they only read guest memory or set
  * atomics.  Every write and every guest call happens in trainer_tick() on the game's main PPU thread.
  */
+#include "infamous_region.h"
 #include "trainer.h"
 #include "rsx_ui_trainer.h"
 #include "ppu_recomp.h"
@@ -60,8 +61,8 @@ constexpr uint32_t kOffTeam       = 0x8ACu, kOffRel = 0x8C0u;
 constexpr uint32_t kCharList      = 0x007BA070u;
 constexpr uint32_t kCharEntrySize = 12u;
 constexpr int      kCharMax       = 64;
-constexpr uint32_t kModifyHealth  = 0x002AF108u;
-constexpr uint32_t kTitleToc      = 0x0078BFC0u;
+constexpr uint32_t kModifyHealth  = INF_RA(0x002AF108u);
+constexpr uint32_t kTitleToc      = INF_TITLE_TOC;
 
 /* ---- guest memory helpers ------------------------------------------------------------------------------------- */
 inline bool  heap_ptr(uint32_t p)  { return p >= 0x10000000u && p < 0xC0000000u && (p & 3u) == 0; }
@@ -173,7 +174,7 @@ void guest_call1(void (*fn)(ppu_context*), uint32_t cia, uint32_t a3)
  * (The old A-D OnDisable test: A = obj+0x120 is his collision -- he fell through the world; B/C/D did nothing.) */
 constexpr uint32_t kOffDrawSlot   = 0x100u, kOffShadowSlot = 0x108u;
 constexpr uint32_t kDrawListLo    = 0x4828u, kShadowListLo  = 0x4800u;   /* header = base + 0x10000 - this */
-constexpr uint32_t kRefreshEntity = 0x0027FC18u;
+constexpr uint32_t kRefreshEntity = INF_RA(0x0027FC18u);
 std::atomic<int> g_hide_cole{0};
 
 uint32_t entity_list_header(uint32_t lo)
@@ -221,7 +222,7 @@ constexpr uint32_t kOffBones = 0xF8u, kOffBoneN = 0xFCu, kOffPalStamp = 0x234u, 
 constexpr uint32_t kOffAnim = 0x160u, kOffQuat = 0x80u, kOffMtx = 0xB0u, kOffMtxT = 0xE0u, kOffScale = 0x70u;
 constexpr uint32_t kOffPhysPos = 0x220u, kOffModelInst = 0x18u, kModelInstId = 0x28u, kOffCollList = 0x120u;
 constexpr uint32_t kClassPed = 0x0072A9D8u, kClassEnemy = 0x0072A770u;
-constexpr uint32_t kCollOff = 0x00200568u, kCollOn = 0x00203008u;
+constexpr uint32_t kCollOff = INF_RA(0x00200568u), kCollOn = INF_RA(0x00203008u);
 constexpr int      kMaxBones = 320;
 constexpr float    kModelRange = 6000.0f;        /* cm */
 constexpr int      kBindTries = 180;             /* ticks to wait for two agreeing palette samples */
@@ -575,8 +576,8 @@ uint32_t charset()
     if (!pg) return 0;
     s_cs = pg;                                         /* 0x60 bytes, 16-aligned */
     for (uint32_t i = 0; i < 0x80u; i += 4) vm_write32(s_cs + i, 0);
-    guest_call(func_0027A020, 0x0027A020u, s_cs, kCharSetPrio);
-    guest_call(func_0027A720, 0x0027A720u, kCharSetReg, s_cs);
+    guest_call(func_0027A020, INF_RA(0x0027A020u), s_cs, kCharSetPrio);
+    guest_call(func_0027A720, INF_RA(0x0027A720u), kCharSetReg, s_cs);
     std::fprintf(stderr, "[TRAINER] character set 0x%08X registered (priority %d)\n", s_cs, kCharSetPrio);
     return s_cs;
 }
@@ -587,22 +588,22 @@ uint32_t obj_find(uint32_t oid)
     if (!data_ptr(t)) return 0;
     const uint32_t tab = vm_read32(t - 0x8000u);
     if (!tab) return 0;
-    return guest_call(func_00051BE0, 0x00051BE0u, tab, oid, 0, 0);
+    return guest_call(func_00051BE0, INF_RA(0x00051BE0u), tab, oid, 0, 0);
 }
 
 void char_release(const char* why)
 {
     if (s_site && s_char_state == 2) {
-        guest_call(func_00218060, 0x00218060u, s_site);                       /* UNSPAWN_ALL */
+        guest_call(func_00218060, INF_RA(0x00218060u), s_site);                       /* UNSPAWN_ALL */
         if (s_pf && heap_ptr(s_pf)) {
             const uint32_t rc = vm_read32(s_pf + 4);
             if (rc > 0 && rc < 0x10000u) {
                 vm_write32(s_pf + 4, rc - 1);
-                if (rc - 1 == 0) guest_call(func_0004E658, 0x0004E658u, s_pf);
+                if (rc - 1 == 0) guest_call(func_0004E658, INF_RA(0x0004E658u), s_pf);
             }
         }
     }
-    if (s_cs && s_char >= 0) guest_call(func_0027A2C0, 0x0027A2C0u, s_cs);   /* nothing requested any more */
+    if (s_cs && s_char >= 0) guest_call(func_0027A2C0, INF_RA(0x0027A2C0u), s_cs);   /* nothing requested any more */
     if (s_char >= 0) std::fprintf(stderr, "[TRAINER] character %s released (%s)\n", kChars[s_char].name, why);
     s_char = -1; s_char_state = 0; s_char_ticks = 0; s_pf = 0;
 }
@@ -613,7 +614,7 @@ uint32_t char_tick(uint32_t cole)
     if (s_char < 0 || !cole) return 0;
     const GameChar& c = kChars[s_char];
     if (s_char_state == 1) {
-        if (!guest_call(func_0027A840, 0x0027A840u, s_cs)) {
+        if (!guest_call(func_0027A840, INF_RA(0x0027A840u), s_cs)) {
             if (++s_char_ticks > kLoadTicks) { g_char_err.store(1); std::fprintf(stderr, "[TRAINER] %s: package did not load\n", c.name);
                                                char_release("load timeout"); }
             return 0;
@@ -626,13 +627,13 @@ uint32_t char_tick(uint32_t cole)
             char_release("no site"); return 0;
         }
         if (!s_site_orig[0]) for (int i = 0; i < 3; ++i) s_site_orig[i] = vm_read32(s_site_data + 0x90u + 4u * i);
-        if (vm_read32(s_site + 0xA0)) guest_call(func_00218060, 0x00218060u, s_site);       /* site already used */
+        if (vm_read32(s_site + 0xA0)) guest_call(func_00218060, INF_RA(0x00218060u), s_site);       /* site already used */
         const uint32_t want[3] = { c.pack, c.geom, c.phys };
         for (int i = 0; i < 3; ++i) vm_write32(s_site_data + 0x90u + 4u * i, want[i]);
         /* spawn 3 m beside Cole (he hides / the stand-in moves onto him once it is live) */
         float v[4] = { rdf(cole + kOffPos) + 300.0f, rdf(cole + kOffPos + 4), rdf(cole + kOffPos + 8), 1.0f };
-        guest_call(func_003562C0, 0x003562C0u, s_site, 0, 0, 0, v);
-        s_pf = guest_call(func_00218F30, 0x00218F30u, s_site);
+        guest_call(func_003562C0, INF_RA(0x003562C0u), s_site, 0, 0, 0, v);
+        s_pf = guest_call(func_00218F30, INF_RA(0x00218F30u), s_site);
         for (int i = 0; i < 3; ++i) vm_write32(s_site_data + 0x90u + 4u * i, s_site_orig[i]);
         if (!heap_ptr(s_pf)) {
             g_char_err.store(3); std::fprintf(stderr, "[TRAINER] %s: spawn returned 0x%08X\n", c.name, s_pf);
@@ -640,13 +641,13 @@ uint32_t char_tick(uint32_t cole)
         }
         vm_write32(s_pf + 4, vm_read32(s_pf + 4) + 1);                               /* hold a reference */
         s_char_state = 2;
-        const uint32_t ch = guest_call(func_00216548, 0x00216548u, s_pf);
+        const uint32_t ch = guest_call(func_00216548, INF_RA(0x00216548u), s_pf);
         std::fprintf(stderr, "[TRAINER] %s spawned: ProxyFile 0x%08X character 0x%08X (class 0x%08X, %u bones)\n",
                      c.name, s_pf, ch, heap_ptr(ch) ? vm_read32(ch) : 0, heap_ptr(ch) ? vm_read32(ch + kOffBoneN) : 0);
         return heap_ptr(ch) ? ch : 0;
     }
     if (s_char_state == 2 && s_pf) {
-        const uint32_t ch = guest_call(func_00216548, 0x00216548u, s_pf);
+        const uint32_t ch = guest_call(func_00216548, INF_RA(0x00216548u), s_pf);
         return heap_ptr(ch) ? ch : 0;
     }
     return 0;
@@ -658,8 +659,8 @@ bool char_request(int idx)
     g_char_err.store(0);
     const uint32_t cs = charset();
     if (!cs) { g_char_err.store(4); return false; }
-    guest_call(func_0027A2C0, 0x0027A2C0u, cs);
-    if (!guest_call(func_0027A950, 0x0027A950u, cs, kChars[idx].pack)) {
+    guest_call(func_0027A2C0, INF_RA(0x0027A2C0u), cs);
+    if (!guest_call(func_0027A950, INF_RA(0x0027A950u), cs, kChars[idx].pack)) {
         std::fprintf(stderr, "[TRAINER] %s: character set refused OID 0x%X\n", kChars[idx].name, kChars[idx].pack);
         g_char_err.store(1); return false;
     }
@@ -1102,7 +1103,7 @@ extern "C" void infamous_trainer_move_set(ppu_context* ctx)
  * Entity +0x7C = its character. */
 extern "C" void ppu_register_function(uint64_t addr, void (*fn)(ppu_context*));   /* ppu_loader.cpp */
 namespace {
-constexpr uint32_t kFnEntityUpdate = 0x00274630u, kFnEntityThunk = 0x004BA678u, kThunkAdj = 0x68u, kEntActor = 0x7Cu;
+constexpr uint32_t kFnEntityUpdate = INF_RA(0x00274630u), kFnEntityThunk = INF_RA(0x004BA678u), kThunkAdj = 0x68u, kEntActor = 0x7Cu;
 constexpr uint32_t kSigThunk0 = 0x3863FF98u /* addi r3,r3,-104 */, kSigThunk1 = 0x4BDB9FB4u /* b 0x274630 */;
 constexpr uint32_t kSigUpdate0 = 0x7D800026u /* mfcr r12 */;
 constexpr uint32_t kOffUpdEnt2 = 0x358u;      /* group 2 = locomotion / physics / animation feed */
