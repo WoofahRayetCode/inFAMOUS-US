@@ -1107,6 +1107,7 @@ static int shadow_skip_draw(const rsx_state* st)
  * the frame limiter -- until the next vblank on every present (up to ~16 ms of a
  * ~110 ms frame). Flip-model windowed present with interval 0 does not tear (DWM). */
 volatile int g_win_fullscreen = 0;   /* v194: F11 state, for the settings menu */
+volatile int g_win_sizemove = 0;     /* window is in modal move/resize loop */
 static int s_tearing_ok = 0;   /* v209 */
 static UINT present_sync_interval(void)
 {
@@ -1288,6 +1289,17 @@ static u32    s_lock_n  = 0;
 static LRESULT CALLBACK d3d12_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
     switch (msg) {
+    case WM_ENTERSIZEMOVE:
+    case WM_NCLBUTTONDOWN: {
+        g_win_sizemove = 1;
+        extern volatile int g_pad_mouse_captured;
+        g_pad_mouse_captured = 0;
+        break;
+    }
+    case WM_EXITSIZEMOVE:
+    case WM_CAPTURECHANGED:
+        g_win_sizemove = 0;
+        break;
     case WM_SETCURSOR: {   /* v150: hide the pointer while cellPad's mouse-look owns it */
         extern volatile int g_pad_mouse_captured;
         if (g_pad_mouse_captured && LOWORD(lp) == HTCLIENT) { SetCursor(NULL); return TRUE; }
@@ -2952,6 +2964,7 @@ typedef struct { unsigned long long h; char tgt[8]; u32 len; const u8* data; } S
 #define SHCP_CAP 16384u
 static ShcpEnt s_shcp[SHCP_CAP];
 static u32 s_shcp_n = 0;
+static volatile long s_shcp_dirty = 0;
 static SRWLOCK s_shcp_lock = SRWLOCK_INIT;
 static int s_shcp_cfg = -1, s_shcp_phase = -1;
 static volatile LONG64 s_shcp_cnt[2][3], s_shcp_tsc[2][3];   /* [parity][pack, file, compile] */
@@ -2979,6 +2992,7 @@ static int shcp_insert(unsigned long long h, const char* tgt, const u8* data, u3
             ShcpEnt* e = &s_shcp[i];
             e->h = h; memset(e->tgt, 0, sizeof e->tgt); memcpy(e->tgt, tgt, strlen(tgt)); e->len = len; e->data = data;
             s_shcp_n++; ok = 1;
+            s_shcp_dirty = 1;
         }
     }
     ReleaseSRWLockExclusive(&s_shcp_lock);
@@ -3010,6 +3024,7 @@ static int shcp_find(unsigned long long h, const char* tgt, ID3DBlob** out)
 static void shcp_save(void)
 {
     AcquireSRWLockShared(&s_shcp_lock);
+    s_shcp_dirty = 0;
     size_t total = 12;
     for (u32 i = 0; i < SHCP_CAP; i++) if (s_shcp[i].data) total += 8 + 8 + 4 + s_shcp[i].len;
     u8* b = (u8*)malloc(total);
@@ -3710,10 +3725,10 @@ static DWORD WINAPI psl_save_thread(LPVOID p)
 {
     const DWORD ms = (DWORD)(uintptr_t)p;
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
-    for (;;) { Sleep(ms); psl_save("periodic"); }
+    for (;;) { Sleep(ms); psl_save("periodic"); if (s_shcp_dirty) shcp_save(); }
     return 0;
 }
-void rsx_d3d12_psolib_flush(void) { psl_save("exit"); }   /* v225A: called from the exit paths when available */
+void rsx_d3d12_psolib_flush(void) { psl_save("exit"); if (s_shcp_dirty) shcp_save(); }   /* v225A: called from the exit paths when available */
 static int psl_init(void)
 {
     if (s_psl_on >= 0) return s_psl_on;
@@ -6956,6 +6971,7 @@ static void lodtab_tick(void)
     if ((k == 1.0f && s_lcs_n == 0) || gave_up || !vm_base) return;
     if (!ea) {
         u32 cand = 0x0078AD80u, ok = 1;
+        if (lod_be(cand) != sig[0] && lod_be(0x0078AD30u) == sig[0]) cand = 0x0078AD30u;
         for (int i = 0; i < 8 && ok; i++) ok = lod_be(cand + 4u * i) == sig[i];
         if (!ok) {   /* other EBOOT revision: one scan of the PPU data area */
             cand = 0;
@@ -6970,10 +6986,12 @@ static void lodtab_tick(void)
         fprintf(stderr, "[LODX] draw-distance table at 0x%08X: 400 750 1500 3500 6000 12000 -> x%.2f%c", ea, k, 10);
     }
     const int want = g_lodx_f5_off ? 0 : 1;
+    extern volatile float g_v237_lodf;
+    const float adapt = (g_v237_lodf > 0.05f && g_v237_lodf <= 2.0f) ? g_v237_lodf : 1.0f;
     /* re-assert every frame if someone rewrote it (cheap: 6 words) */
     for (int i = 1; i <= 6; i++) {
         float o; memcpy(&o, &sig[i], 4);
-        float v = want ? o * k * (s_lcs_n ? s_lcs[s_lcs_set & 7][i - 1] : 1.0f) : o;
+        float v = want ? o * k * (s_lcs_n ? s_lcs[s_lcs_set & 7][i - 1] : 1.0f) * adapt : o;
         if (lod_f(ea + 4u * i) != v) lod_wf(ea + 4u * i, v);
     }
     if (want != state) { state = want; fprintf(stderr, "[LODX] draw-distance table %s%c", want ? "SCALED" : "original", 10); }

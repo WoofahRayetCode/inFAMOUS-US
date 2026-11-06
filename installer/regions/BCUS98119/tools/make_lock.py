@@ -11,6 +11,9 @@ UI_FONT   assets/ui_font.bin as the pipeline makes it from the US disc
 
 SPU files are byte-identical to the European pipeline's, so their lock lines and
 patches are shared. Only the PPU sources and the font have US entries.
+
+Also writes eu-source.lock: the hashes of the European PPU patches this set was
+rebased from, which tools/check_sync.py compares with the checkout.
 """
 import hashlib
 import re
@@ -61,7 +64,13 @@ def main(root: Path, lift: Path, final: Path, elf: Path, font: Path) -> int:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(patch(base, fin, rel))
     (region / "generated.lock").write_bytes(("\n".join(out) + "\n").encode())
-    print(f"{len(out)} lock lines, {len(NAMES)} patches")
+    eu = root / "installer/patches/infamous-recomp/recompiled"
+    source = ["# European PPU patches the set in patches/ was rebased from (sha256, sha256sum's order).",
+               "# make_lock.py writes this; tools/check_sync.py compares it with installer/patches/."]
+    for name in NAMES:
+        source.append(f"{sha(eu / f'{name}.patch')}  {name}.patch")
+    (region / "eu-source.lock").write_bytes(("\n".join(source) + "\n").encode())
+    print(f"{len(out)} lock lines, {len(NAMES)} patches, {len(source) - 2} European source hashes")
     return 0
 
 

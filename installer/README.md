@@ -1,8 +1,8 @@
-# infamous-installer
+# infamous-installer (US Project - BCUS98119)
 
-Builds the inFamous (BCES00220 or BCUS98119) PC port from the player's **own** copy of the game. The port's
+Builds the inFamous (US `BCUS98119` / European `BCES00220`) PC port from the player's **own** copy of the game. The port's
 repository holds no game code and no game data. The installer regenerates all of it from the
-player's dump, applies the port's patches, compiles it and writes a launcher.
+player's dump, applies the region-specific patches (from `installer/regions/BCUS98119/`), compiles it and writes a launcher.
 
 It's written in Rust with no dependencies, so it builds offline with a plain Rust toolchain:
 
@@ -16,7 +16,7 @@ cargo build --release
 
 You need:
 
-* **Your inFamous disc dump**: the folder that contains `PS3_GAME` (European BCES00220, or US BCUS98119, which is experimental).
+* **Your inFamous disc dump**: the folder that contains `PS3_GAME` (US release `BCUS98119`).
 * **Python 3.10+** from python.org, with "Add python.exe to PATH" ticked.
 * **Visual Studio 2022 Build Tools** with the *Desktop development with C++* workload and the
   *C++ Clang Compiler for Windows* component.

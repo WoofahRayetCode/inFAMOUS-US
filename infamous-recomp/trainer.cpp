@@ -34,7 +34,7 @@ namespace {
 
 /* ---- addresses ------------------------------------------------------------------------------------------------ */
 constexpr uint32_t kPlayerSlots[] = { 0x0091032Cu, 0x007BA080u, 0x007CCE30u, 0x008F7400u, 0x009136BCu };
-constexpr uint32_t kClassCole     = 0x00727A28u;
+constexpr uint32_t kClassCole     = INF_CLASS_COLE;
 constexpr uint32_t kOffHpMax      = 0x750u, kOffHp = 0x754u;
 /* Energy, found 2026-10-21: obj+0xED4 f32 current (poke 112 -> the HUD meter showed
  * half; the game copies it to +0xEE0), obj+0xED8 f32 = 225 at full on the test save, used as the maximum.
@@ -221,7 +221,7 @@ bool entity_list_remove(uint32_t lo, uint32_t slot)
 constexpr uint32_t kOffBones = 0xF8u, kOffBoneN = 0xFCu, kOffPalStamp = 0x234u, kOffPal = 0x238u, kOffPalN = 0x23Cu;
 constexpr uint32_t kOffAnim = 0x160u, kOffQuat = 0x80u, kOffMtx = 0xB0u, kOffMtxT = 0xE0u, kOffScale = 0x70u;
 constexpr uint32_t kOffPhysPos = 0x220u, kOffModelInst = 0x18u, kModelInstId = 0x28u, kOffCollList = 0x120u;
-constexpr uint32_t kClassPed = 0x0072A9D8u, kClassEnemy = 0x0072A770u;
+constexpr uint32_t kClassPed = INF_CLASS_PED, kClassEnemy = INF_CLASS_ENEMY;
 constexpr uint32_t kCollOff = INF_RA(0x00200568u), kCollOn = INF_RA(0x00203008u);
 constexpr int      kMaxBones = 320;
 constexpr float    kModelRange = 6000.0f;        /* cm */

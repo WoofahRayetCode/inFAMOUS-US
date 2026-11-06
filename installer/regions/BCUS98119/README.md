@@ -39,6 +39,11 @@ python audit_rebase.py ROOT WORK      :: applies the header patch and reports wh
 python make_lock.py ROOT WORK/out/recompiled WORK/out/us_final WORK/us/EBOOT.elf <US ui_font.bin>
 ```
 
+`make_lock.py` also writes `eu-source.lock`, the European patch hashes this set came from.
+`python tools/check_sync.py ROOT` compares it with `installer/patches/` and exits 1 when a European
+patch was added or changed since: the US build then still carries the old code, and the US patches
+apply cleanly either way, so nothing else notices. Rerun the steps above when it reports drift.
+
 `rebase_ppu.py` applies the semantic hunks at the matching place in the US lift and translates their
 addresses. It then applies the mechanical `stvx` rewrite to every matching line.
 
@@ -52,7 +57,7 @@ Any new hand-written address also needs an entry in `infamous_region.h`.
 2. Build the installer from this checkout (`cd installer && cargo build --release`) and put
    `infamous-installer.exe` / `infamous-launch.exe` in `installer/bin/`: the upstream binaries know nothing about
    `installer/regions/`.
-3. `installerin\infamous-installer.exe install --game "<dump folder>" --build-jobs 12` from the checkout root
+3. `installer\bin\infamous-installer.exe install --game "<dump folder>" --build-jobs 12` from the checkout root
    (outside OneDrive). The pipeline lifts 8476 PPU functions, 62 SPU images and 21 job modules, applies this folder's
    PPU patches plus the shared SPU patches, and builds with clang-cl. `INFAMOUS_BUILD_JOBS=<n>` sets the compile
    jobs for `Update inFamous.cmd` too; the five lifted PPU units are the memory hogs.
@@ -60,7 +65,8 @@ Any new hand-written address also needs an entry in `infamous_region.h`.
 
 Status: the US build boots, shows the autosave notice (Enter), reaches the title screen and plays at 60 fps in
 1080p with the upscaler off. On an RTX 5060 Laptop (driver 621.01, DLSS SDK 310.9.16) `UPSCALER=dlaa` hung the
-GPU (DXGI_ERROR_DEVICE_HUNG) on the first in-world frame; run `play-dred.cmd` (adds `D3D12_DRED=1`) to get the
+GPU (DXGI_ERROR_DEVICE_HUNG) on the first in-world frame; run `play-dred.cmd` (the installer writes it
+next to `Play inFamous.cmd`; it adds `D3D12_DRED=1` and logs to `play-dred.err.log`) to get the
 device-removed breadcrumbs when investigating. `make_kbm_prompts.py` carries the US texture IDs of the HUD prompt
 textures (`core.xpp` object IDs differ per release); `make_kbm_icons.py` reads the pipeline's
 `assets/font_icons_l0.bin`.

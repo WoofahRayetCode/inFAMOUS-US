@@ -212,12 +212,8 @@ static bool pm_match(uint32_t ea, const uint32_t* w, int n)
 }
 static void pm_write(uint32_t ea, const uint32_t* w, int n) { for (int i = 0; i < n; i++) vm_write32(ea + 4u * i, w[i]); }
 
-/* Word 7 is an OPD in the EBOOT (European 0x0077C170), so it is left out of the match on other releases. */
-#ifdef INFAMOUS_REGION_US
-#define PM_ANCHOR_OPD W_
-#else
-#define PM_ANCHOR_OPD 0x0077C170u
-#endif
+/* Word 7 is an OPD in the EBOOT (European 0x0077C170, US 0x0077C128). */
+#define PM_ANCHOR_OPD INF_PM_ANCHOR_OPD
 static const uint32_t PM_ANCHOR_W[] = { 0x01040400u, 0x00019F4Cu, 0x70000000u, 0x3A0B0000u, 0x43000014u, 0x38000000u, 0x00000000u, PM_ANCHOR_OPD, 0x4200012Cu };
 static const uint8_t  PM_ANCHOR_B[16] = { 0x01,0x04,0x04,0x00, 0x00,0x01,0x9F,0x4C, 0x70,0x00,0x00,0x00, 0x3A,0x0B,0x00,0x00 };
 

@@ -148,7 +148,7 @@ extern "C" volatile int g_ab_phase;
 namespace lodadapt {
 static int on = -1, phase = -1;
 static float fmin = 1.f, cur = 1.f, kscale = 1.f;
-static double ema = 0, lo_ms = 15.63, hi_ms = 17.24, sweep_ms = 2000, alpha = 1.0 / 30;
+static double ema = 0, lo_ms = 13.33, hi_ms = 15.87, sweep_down_ms = 400.0, sweep_up_ms = 3500.0, alpha_down = 1.0 / 6.0, alpha_up = 1.0 / 30.0;
 static Clock::time_point last_end{}, win{};
 static double st_sum = 0, st_ms = 0; static unsigned st_n = 0, st_lo = 0, st_hi = 0, st_act = 0;
 static double envd(const char* n, double d) { const char* e = std::getenv(n); return (e && *e) ? std::atof(e) : d; }
@@ -160,16 +160,18 @@ static void init()
     const char* k = std::getenv("LOD_CLASS_SCALE");
     kscale = k ? (float)std::atof(k) : 1.f;
     if (!(kscale >= 0.25f && kscale <= 20.f)) kscale = 1.f;
-    const double mins = envd("ADAPT_LOD_MIN", 1.0);
+    const double mins = envd("ADAPT_LOD_MIN", 0.85);
     fmin = (float)(mins / kscale);
     if (!(fmin > 0.05f) || fmin >= 1.f) { on = 0; std::fprintf(stderr, "[LODADAPT] v237B off: LOD_CLASS_SCALE %.2f <= ADAPT_LOD_MIN %.2f\n", kscale, mins); return; }
-    const double lf = envd("ADAPT_LOD_LO_FPS", 58.0), hf = envd("ADAPT_LOD_HI_FPS", 64.0);
-    hi_ms = 1000.0 / (lf > 5 ? lf : 58.0); lo_ms = 1000.0 / (hf > lf ? hf : lf + 1.0);
-    const double sec = envd("ADAPT_LOD_SEC", 2.0); sweep_ms = (sec > 0.1 ? sec : 2.0) * 1000.0;
-    const double tau = envd("ADAPT_LOD_TAU", 30.0); alpha = 1.0 / (tau >= 1.0 ? tau : 1.0);
+    const double lf = envd("ADAPT_LOD_LO_FPS", 63.0), hf = envd("ADAPT_LOD_HI_FPS", 75.0);
+    hi_ms = 1000.0 / (lf > 5 ? lf : 63.0); lo_ms = 1000.0 / (hf > lf ? hf : lf + 1.0);
+    const double sec_d = envd("ADAPT_LOD_SWEEP_DOWN_SEC", 0.40); sweep_down_ms = (sec_d > 0.05 ? sec_d : 0.40) * 1000.0;
+    const double sec_u = envd("ADAPT_LOD_SWEEP_UP_SEC", 3.50); sweep_up_ms = (sec_u > 0.1 ? sec_u : 3.50) * 1000.0;
+    const double tau_d = envd("ADAPT_LOD_TAU_DOWN", 6.0); alpha_down = 1.0 / (tau_d >= 1.0 ? tau_d : 1.0);
+    const double tau_u = envd("ADAPT_LOD_TAU_UP", 30.0); alpha_up = 1.0 / (tau_u >= 1.0 ? tau_u : 1.0);
     const char* p = std::getenv("ADAPT_LOD_PHASE"); phase = (p && (*p == '0' || *p == '1')) ? *p - '0' : -1;
-    std::fprintf(stderr, "[LODADAPT] v237B adaptive draw distance ON: scale %.2f..%.2f, lower below %.1f fps (%.2f ms), raise above %.1f fps (%.2f ms), sweep %.1f s, tau %.0f frames, phase %d\n",
-                 kscale * fmin, kscale, 1000.0 / hi_ms, hi_ms, 1000.0 / lo_ms, lo_ms, sweep_ms / 1000.0, 1.0 / alpha, phase);
+    std::fprintf(stderr, "[LODADAPT] v237C asymmetric adaptive draw distance ON: scale %.2f..%.2f, lower below %.1f fps (%.2f ms, sweep %.2fs), raise above %.1f fps (%.2f ms, sweep %.1fs), phase %d\n",
+                 kscale * fmin, kscale, 1000.0 / hi_ms, hi_ms, sweep_down_ms / 1000.0, 1000.0 / lo_ms, lo_ms, sweep_up_ms / 1000.0, phase);
 }
 static void begin()
 {
@@ -181,14 +183,19 @@ static void begin()
         const double ms = std::chrono::duration<double, std::milli>(now - last_end).count();
         if (ms > 0 && ms < 250.0) {   // loading / pause gaps are not frames
             const double s = ms < 2.0 * hi_ms ? ms : 2.0 * hi_ms;   // one hitch must not swing the EMA
-            ema = (ema <= 0) ? s : ema + (s - ema) * alpha;
+            const double a = (s > hi_ms) ? alpha_down : alpha_up;
+            ema = (ema <= 0) ? s : ema + (s - ema) * a;
             const bool act = phase < 0 || (g_ab_phase & 1) == phase;
             float c = cur;
             if (!act) c = 1.f;
             else {
-                const float step = (float)((1.0 - fmin) * s / sweep_ms);
-                if (ema > hi_ms) { c -= step; if (c < fmin) c = fmin; }
-                else if (ema < lo_ms) { c += step; if (c > 1.f) c = 1.f; }
+                if (ema > hi_ms) {
+                    const float step = (float)((1.0 - fmin) * s / sweep_down_ms);
+                    c -= step; if (c < fmin) c = fmin;
+                } else if (ema < lo_ms) {
+                    const float step = (float)((1.0 - fmin) * s / sweep_up_ms);
+                    c += step; if (c > 1.f) c = 1.f;
+                }
             }
             cur = c; g_v237_lodf = c;
             st_sum += c; st_ms += ms; st_n++; st_lo += c <= fmin; st_hi += c >= 1.f; st_act += act;

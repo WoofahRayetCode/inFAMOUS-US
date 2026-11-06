@@ -6,6 +6,7 @@ Play inFamous.cmd
 inFamous.exe
 
 # Game data must never be committed
+/Infamous (US)
 /Infamous (Europe) (Fr,De,Es,It,Nl)
 PS3_GAME/
 *.iso

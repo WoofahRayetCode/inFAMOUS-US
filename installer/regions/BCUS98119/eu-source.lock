@@ -1,0 +1,8 @@
+# European PPU patches the set in patches/ was rebased from (sha256, sha256sum's order).
+# make_lock.py writes this; tools/check_sync.py compares it with installer/patches/.
+44231633024a83448cdaf98a3d312f6dfc94c9b2dc0a8ead6311d1984566abfa  ppu_recomp.h.patch
+c6d78483643f7e6378b17463d3fef83ff867d86313c799e35ba86a1ce0d14795  ppu_recomp_000.cpp.patch
+771cfae581d12e62e2b950f673dd2a6e44f43690cbdf4bba1e20fc078f07bc92  ppu_recomp_001.cpp.patch
+3cfe78e738d48c0b0a6bf4a33df8413528e0822d29a584ca5d0317326440c585  ppu_recomp_002.cpp.patch
+dba33c2e21d51a1d4dfcc5d66b14e9c8b049d61f9653d7b6fa8f19479a710967  ppu_recomp_003.cpp.patch
+68c79d0778108c9d2a5a32d36bb3477a9dcf47bfb3be0b5ed22f3f1b044773a3  ppu_recomp_004.cpp.patch

@@ -44,7 +44,7 @@ static void lodx_v231_apply_inner(spu_context* ctx, uint32_t p)
     }
     float vf = 1.f;
     if (s_sho > 0 && (s_shoph < 0 || (g_ab_phase & 1) == s_shoph) && spu_ls_read32(ctx, p + 0x20) <= 8) vf = s_shof;
-    const float sc = s_scale * g_v237_lodf * vf;   /* v237B: x adaptive factor x view factor (both 1.0f = unchanged) */
+    const float sc = s_scale * vf;   /* g_v237_lodf applied directly to base table in lodtab_tick() */
     if (s_occ > 0) {
         uint32_t n = spu_ls_read32(ctx, p + 0x20);
         if (n > (uint32_t)s_occ && n < 256) spu_ls_write32(ctx, p + 0x20, (uint32_t)s_occ);

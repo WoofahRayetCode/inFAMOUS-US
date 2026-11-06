@@ -39,13 +39,15 @@
 #include <cmath>
 #include <chrono>
 
+#include "infamous_region.h"
+
 extern "C" unsigned ppu_boot_frames_presented(void);
 extern "C" volatile int g_ab_phase;
 
 namespace carv {
 static int s_init = 0, s_vis = 0, s_phase = 0;
 static float s_k = 1.0f, s_radius = 0.0f, s_spmin = 0.0f, s_spvr = 0.0f;
-static const uint32_t EA_SPAWN_MIN2 = 0x0076B564u, EA_SPAWN_VISR = 0x0076B580u;   /* traffic-module literal pool */
+static const uint32_t EA_SPAWN_MIN2 = INF_CAR_SPAWN_MIN2, EA_SPAWN_VISR = INF_CAR_SPAWN_VISR;   /* traffic-module literal pool */
 static inline bool va(uint32_t a) { return a >= 0x10000u && a < 0xF0000000u && !(a & 3u); }
 static inline float rf(uint32_t a) { uint32_t u = vm_read32(a); float f; std::memcpy(&f, &u, 4); return f; }
 static inline void wf(uint32_t a, float f) { uint32_t u; std::memcpy(&u, &f, 4); vm_write32(a, u); }
@@ -258,7 +260,7 @@ extern "C" void car_v233_vis(ppu_context* ctx)
         if (d >= 0) s_vis_hist[d >= 15000.0f ? 15 : (int)(d / 1000.0f)]++;
         const uint32_t camp = vm_read32(view + 0x2E0);
         const float cs = va(camp) ? rf(camp + 0x2A8) : 0.0f;
-        const uint32_t tab = 0x0078AD80u;
+        const uint32_t tab = INF_LOD_TAB;
         const float nearlim = (e->nearc < 7 ? rf(tab + 4u * e->nearc) : 0.0f) * cs;
         const float farlim = (e->farc < 7 ? rf(tab + 4u * (e->farc + 1u)) : 0.0f) * cs;
         std::fprintf(stderr, "[CARVIS] f%u VISIBLE %s inst 0x%08X model 0x%08X d %.0f (first query f%u d %.0f%s) cls %u/%u band %.0f..%.0f (x%.2f) lr 0x%08X cam-cole %.0f\n",

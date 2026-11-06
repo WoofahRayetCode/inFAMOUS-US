@@ -495,19 +495,33 @@ static void pad_poll_kbm(int merge)
     /* v155 MENU MODE: Esc = Start (opens/closes the pause menu) and frees the mouse pointer (visible, not
      * recentred, mouse buttons not mapped) until Esc again or a left click in the game window. */
     static int s_menu_free = 0, s_esc_prev = 0, s_lmb_block = 0;
+    static int s_lmb_prev = 0, s_drag_nonclient = 0;
+    const int lmb_now = KD(VK_LBUTTON);
+    const int lmb_down_edge = lmb_now && !s_lmb_prev;
+    s_lmb_prev = lmb_now;
+    if (!lmb_now) s_drag_nonclient = 0;
     {
         const int esc = KD(s_kb[KB_START]);
         extern volatile int g_uiov_menu_open;   /* v194: Esc belongs to the settings menu while it is open */
         if (esc && !s_esc_prev && !g_uiov_menu_open) s_menu_free = !s_menu_free;
         s_esc_prev = esc;
-        if (s_menu_free && KD(VK_LBUTTON)) {
-            HWND fw = GetForegroundWindow(); POINT cp; RECT cr;
-            if (fw && GetCursorPos(&cp) && ScreenToClient(fw, &cp) && GetClientRect(fw, &cr) &&
-                cp.x >= 0 && cp.y >= 0 && cp.x < cr.right && cp.y < cr.bottom) {
-                s_menu_free = 0; s_lmb_block = 1;   /* the recapturing click is not a shot */
-            }
+
+        HWND fw = GetForegroundWindow();
+        POINT cp = {0}; RECT cr = {0};
+        int cp_inside = 0;
+        if (fw && GetCursorPos(&cp) && ScreenToClient(fw, &cp) && GetClientRect(fw, &cr) && cr.right > 0 && cr.bottom > 0) {
+            cp_inside = (cp.x >= 0 && cp.y >= 0 && cp.x < cr.right && cp.y < cr.bottom);
         }
-        if (s_lmb_block && !KD(VK_LBUTTON)) s_lmb_block = 0;
+        if (lmb_down_edge && !cp_inside) {
+            s_drag_nonclient = 1;
+            s_menu_free = 1;
+            g_pad_mouse_captured = 0;
+        }
+        if (s_menu_free && lmb_down_edge && cp_inside && !s_drag_nonclient) {
+            s_menu_free = 0;
+            s_lmb_block = 1;   /* the recapturing click is not a shot */
+        }
+        if (s_lmb_block && !lmb_now) s_lmb_block = 0;
     }
     /* v196 MENU KEYS: while the game is paused (pause menu and its pages; g_uiov_paused_fn = stubs.cpp probe)
      * W/A/S/D = d-pad, Enter = Cross, Backspace = Circle. Decided per key press: a key already held when the
@@ -584,35 +598,58 @@ static void pad_poll_kbm(int merge)
     HWND fg = GetForegroundWindow();
     int have_mouse = 0;
     extern volatile int g_uiov_menu_open;   /* v194: settings menu open -> free the mouse pointer */
-    if (fg && !alt && !s_menu_free && !g_uiov_menu_open) {
+    extern volatile int g_win_sizemove;     /* rsx_d3d12_backend.c: window drag / resize */
+    int in_modal = g_win_sizemove;
+    if (fg) {
+        GUITHREADINFO gti;
+        memset(&gti, 0, sizeof(gti));
+        gti.cbSize = sizeof(gti);
+        DWORD fg_tid = GetWindowThreadProcessId(fg, NULL);
+        if (fg_tid && GetGUIThreadInfo(fg_tid, &gti)) {
+            if ((gti.flags & (GUI_INMOVESIZE | GUI_INMENUMODE | GUI_SYSTEMMENUMODE)) || gti.hwndMoveSize)
+                in_modal = 1;
+        }
+    }
+    if (in_modal) {
+        g_pad_mouse_captured = 0;
+        s_drag_nonclient = 1;
+    }
+    if (fg && !alt && !s_menu_free && !g_uiov_menu_open && !in_modal && !s_drag_nonclient) {
         RECT rc; POINT c, p;
         if (GetClientRect(fg, &rc) && rc.right > 8 && rc.bottom > 8) {
             c.x = (rc.right - rc.left) / 2; c.y = (rc.bottom - rc.top) / 2;
             ClientToScreen(fg, &c);
             if (GetCursorPos(&p)) {
-                if (g_pad_mouse_captured && pad_mouse_direct()) {
-                    if (map_now) {
-                        const float dx = (float)(g_pad_raw_ok ? raw_dx : p.x - c.x);
-                        const float dy = (float)(g_pad_raw_ok ? raw_dy : p.y - c.y);
+                POINT cp = p;
+                ScreenToClient(fg, &cp);
+                const int inside = (cp.x >= 0 && cp.y >= 0 && cp.x < rc.right && cp.y < rc.bottom);
+                if (!g_pad_mouse_captured && !inside) {
+                    /* cursor is on title bar / border / outside client rect: do not capture or center */
+                } else {
+                    if (g_pad_mouse_captured && pad_mouse_direct()) {
+                        if (map_now) {
+                            const float dx = (float)(g_pad_raw_ok ? raw_dx : p.x - c.x);
+                            const float dy = (float)(g_pad_raw_ok ? raw_dy : p.y - c.y);
+                            s_mx = s_mx * 0.6f + dx * (float)s_sens;
+                            s_my = s_my * 0.6f + (s_inv ? -dy : dy) * (float)s_sens;
+                        } else if (g_pad_raw_ok) {   /* v153: raw device counts */
+                            InterlockedExchangeAdd(&s_mdx, raw_dx);
+                            InterlockedExchangeAdd(&s_mdy, raw_dy);
+                            s_mx = s_my = 0.0f;
+                        } else {
+                            InterlockedExchangeAdd(&s_mdx, (long)(p.x - c.x));
+                            InterlockedExchangeAdd(&s_mdy, (long)(p.y - c.y));
+                            s_mx = s_my = 0.0f;
+                        }
+                    } else if (g_pad_mouse_captured) {
+                        const float dx = (float)(p.x - c.x), dy = (float)(p.y - c.y);
                         s_mx = s_mx * 0.6f + dx * (float)s_sens;
                         s_my = s_my * 0.6f + (s_inv ? -dy : dy) * (float)s_sens;
-                    } else if (g_pad_raw_ok) {   /* v153: raw device counts */
-                        InterlockedExchangeAdd(&s_mdx, raw_dx);
-                        InterlockedExchangeAdd(&s_mdy, raw_dy);
-                        s_mx = s_my = 0.0f;
-                    } else {
-                        InterlockedExchangeAdd(&s_mdx, (long)(p.x - c.x));
-                        InterlockedExchangeAdd(&s_mdy, (long)(p.y - c.y));
-                        s_mx = s_my = 0.0f;
-                    }
-                } else if (g_pad_mouse_captured) {
-                    const float dx = (float)(p.x - c.x), dy = (float)(p.y - c.y);
-                    s_mx = s_mx * 0.6f + dx * (float)s_sens;
-                    s_my = s_my * 0.6f + (s_inv ? -dy : dy) * (float)s_sens;
-                } else { s_mx = s_my = 0.0f; }
-                if (p.x != c.x || p.y != c.y) SetCursorPos(c.x, c.y);
-                g_pad_mouse_captured = 1;
-                have_mouse = 1;
+                    } else { s_mx = s_my = 0.0f; }
+                    if (p.x != c.x || p.y != c.y) SetCursorPos(c.x, c.y);
+                    g_pad_mouse_captured = 1;
+                    have_mouse = 1;
+                }
             }
         }
     }

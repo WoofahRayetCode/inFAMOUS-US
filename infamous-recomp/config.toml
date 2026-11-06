@@ -4,10 +4,10 @@
 
 [input]
 # Path to the decrypted PS3 ELF (EBOOT.BIN after SELF decryption)
-elf_path = "../Infamous (Europe) (Fr,De,Es,It,Nl)/PS3_GAME/USRDIR/EBOOT.elf"
+elf_path = "../Infamous (US)/PS3_GAME/USRDIR/EBOOT.elf"
 
 # Optional: path to the game's PARAM.SFO for metadata
-sfo_path = "../Infamous (Europe) (Fr,De,Es,It,Nl)/PS3_GAME/PARAM.SFO"
+sfo_path = "../Infamous (US)/PS3_GAME/PARAM.SFO"
 
 [output]
 # Directory for generated recompiled C/C++ source files

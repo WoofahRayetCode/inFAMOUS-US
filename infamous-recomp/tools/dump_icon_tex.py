@@ -1,7 +1,9 @@
 import os, sys, struct
 sys.path.insert(0, 'tools')
 from psarc import Psarc
-ARC = os.path.join('..', 'Infamous (Europe) (Fr,De,Es,It,Nl)', 'PS3_GAME', 'USRDIR', 'cache', 'psarc', 'install1', 'infamous1.psarc_s')
+_cand1 = os.path.join('..', 'Infamous (US)', 'PS3_GAME', 'USRDIR', 'cache', 'psarc', 'install1', 'infamous1.psarc_s')
+_cand2 = os.path.join('..', 'Infamous (Europe) (Fr,De,Es,It,Nl)', 'PS3_GAME', 'USRDIR', 'cache', 'psarc', 'install1', 'infamous1.psarc_s')
+ARC = _cand1 if os.path.exists(_cand1) else _cand2
 p = Psarc(ARC); d = p.read(p.names.index('/lang_english.xpp'))
 B = 0x164
 oid = 120625

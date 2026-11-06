@@ -1,47 +1,35 @@
-# inFamous PC
+# inFamous PC (US Release - BCUS98119)
 
-> **Official repo: [github.com/whompay/inFAMOUSreborn](https://github.com/whompay/inFAMOUSreborn).**
-> Only download the Setup from the [Releases page](https://github.com/whompay/inFAMOUSreborn/releases) here.
-> Forks are not supported, and bugs from forks won't be fixed.
+> **Dedicated US Recompilation Project (`BCUS98119`)**  
+> Maintained separately for the North American / US release.  
+> Based on upstream recompiler foundation from [sp00nznet/ps3recomp](https://github.com/sp00nznet/ps3recomp) and [whompay/inFAMOUSreborn](https://github.com/whompay/inFAMOUSreborn).
 
-An unofficial native Windows port of **inFamous** (PlayStation 3, 2009, European
-release `BCES00220`, with experimental support for the US release `BCUS98119`). The game's PowerPC (PPU) and SPU code is statically
+An unofficial native Windows port of **inFamous** (PlayStation 3, 2009, North American / US
+release `BCUS98119`). The game's PowerPC (PPU) and SPU code is statically
 recompiled to x86-64 C/C++ with [ps3recomp](https://github.com/sp00nznet/ps3recomp),
-so it runs as a normal Windows program rather than under an emulator.
+running natively on Windows Direct3D 12 rather than under an emulator.
 
 **This repository contains no game code or data.** You build the game yourself,
 on your own PC, from your own copy of the game.
 
-## Easy install
+## US Release Architecture & Optimizations
 
-Download **inFamous Setup.exe** from the latest release, run it, choose your
-`.iso` (an encrypted image works with its `.dkey` next to it) or your game
-folder (the one with `PS3_GAME` in it), pick an install location and press
-**Install**.
+This dedicated US release tree integrates key structural rebases and optimizations:
 
-Setup checks for Python and the C++ build tools and offers to install them,
-copies the game out of the disc image, regenerates the recompiled code from your
-copy, builds it and adds an inFamous shortcut. Running Setup again on the same
-folder updates or repairs the install and only redoes what changed.
-
-## Updating
-
-When a new version is published here, players update in place instead of reinstalling:
-**Update now** in Setup (it finds the existing install), the **Update inFamous** shortcut in
-the Start menu, or `Update inFamous.cmd` in the install folder. The updater compares every file
-with this repository, downloads only what changed, regenerates the game code only if the
-port's patches changed, and recompiles only the affected parts. Installs made with an older
-Setup need one run of the new Setup on the same folder first.
+* **PPU Address Translation & Rebase:** Uses custom US PPU patches in `installer/regions/BCUS98119/` and dynamic guest address translation via `infamous-recomp/infamous_region.h` to cleanly align US functions, TOC offsets, and static BSS globals.
+* **US HUD Prompt & Font Glyphs:** Maps US-specific `core.xpp` texture object IDs for on-screen controller and keyboard/mouse prompts using `make_kbm_prompts.py` and `make_kbm_icons.py`.
+* **Rooftop & Elevation Stutter Fix:**
+  - **Asymmetric Adaptive LOD:** Fast reduction (EMA tau=6 frames / 0.4s) and gradual recovery (EMA tau=30 frames / 3.5s) with `ADAPT_LOD=1` and `ADAPT_LOD_MIN=0.85` prevents draw-call explosions (25k+ draws/frame) when overlooking Empire City.
+  - **Synchronized PPU Dynamic Actor Scaling:** Multiplies the EBOOT `.data` LOD table (`0x0078AD30`) by `g_v237_lodf` in `rsx_d3d12_backend.c`, ensuring cars, pedestrians, and dynamic props scale down symmetrically with SPU geometry jobs.
+* **Dual-CCD & Multi-Core Affinity Shielding:** Multi-CCD processors (such as AMD Ryzen 9 7950X / 9950X) are protected from high-latency Infinity Fabric stalls (`[TASKWAIT]`) by keeping critical SPU worker threads pinned to CCD 0 (`SPURS_PCORE_WIDS=0,1,2,6`, `V221A_PLACE=0`).
 
 ## Requirements
 
-- Your own inFamous disc dump: European (`BCES00220`) or US (`BCUS98119`, experimental).
+- Your own inFamous US disc dump: `BCUS98119`.
+- Decrypted `EBOOT.elf` (SHA-256: `4f2db3fb7c76fbb4f80cbc8445cf0ea1570a664996a7787e690efcc1a39befb4`).
 - Windows 10 or 11 (64-bit) and a GPU with Direct3D 12 support.
-- A CPU with SSE4.1 (2008 or newer). On CPUs without AVX2 (Intel before 2013, Pentium/Celeron
-  without AVX, AMD before 2015) Setup builds a slower compatibility version automatically.
-  On PCs with 16 or fewer CPU threads the game uses fewer threads and less CPU (tested down to 4 threads).
-- [Python 3.10+](https://www.python.org/downloads/) with "Add python.exe to
-  PATH" ticked.
+- A modern multi-core CPU. Multi-CCD AMD Ryzen and Intel hybrid CPUs are natively supported.
+- [Python 3.10+](https://www.python.org/downloads/) with "Add python.exe to PATH" ticked.
 - [Visual Studio 2022 Build Tools](https://visualstudio.microsoft.com/downloads/)
   with the **Desktop development with C++** workload and the **C++ Clang
   Compiler for Windows** component.
@@ -49,12 +37,26 @@ Setup need one run of the new Setup on the same folder first.
   but no decrypted `EBOOT.elf`. Setup uses it to decrypt the executable.
 - About 10 GB of free disk space and 16 GB of RAM.
 
+## Quick Launch
+
+To play:
+1. Double click **`Play inFamous.cmd`** in the root directory.
+2. If diagnosing GPU device lost or investigating rendering hangs, run **`play-dred.cmd`** (writes extended D3D12 breadcrumbs to `play-dred.err.log`).
+
+## Easy install
+
+Download or run the installer targeting your `BCUS98119` folder (the one containing `PS3_GAME`), pick an install location, and press **Install**.
+
+## Updating
+
+When updates are published to this repository, run `Update inFamous.cmd` in the root folder. The updater compares files, pulls updates, and recompiles only what changed.
+
 ## Building manually
 
 ```bat
 cd installer
 cargo build --release
-target\release\infamous-installer --game "D:\Dumps\inFamous"
+target\release\infamous-installer --game "D:\Dumps\inFamous [BCUS98119]"
 ```
 
 `infamous-installer doctor` checks the requirements only. Finished steps are

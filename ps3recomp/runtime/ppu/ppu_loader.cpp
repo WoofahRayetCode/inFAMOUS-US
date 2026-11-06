@@ -3060,7 +3060,7 @@ static void ps3_indirect_call_v96(ppu_context* ctx)
                 s_icall_depth++;
                 if (g_vcall_sp < 128) g_vcall_stk[g_vcall_sp] = addr;
                 g_vcall_sp++;
-                if (__builtin_expect(s_itl_on, 0) && addr == 0x00274630u && ctx->thread_id == 1)   /* v123b: direct */
+                if (__builtin_expect(s_itl_on, 0) && (addr == 0x00274630u || addr == 0x002747B8u) && ctx->thread_id == 1)   /* v123b: direct (EU 0x00274630, US 0x002747B8) */
                     itl_probe_274630(ctx);
                 fn(ctx);
                 while (g_trampoline_fn) {
@@ -3070,7 +3070,11 @@ static void ps3_indirect_call_v96(ppu_context* ctx)
                      * tail call; probe there, after the adjustment, with the r3 the gate sees. */
                     if (__builtin_expect(s_itl_on, 0) && ctx->thread_id == 1) {
                         static ppu_fn s_f274630 = nullptr; static int s_f_init = 0;
-                        if (!s_f_init) { s_f_init = 1; s_f274630 = ppu_lookup(0x00274630u); }
+                        if (!s_f_init) {
+                            s_f_init = 1;
+                            s_f274630 = ppu_lookup(0x00274630u);
+                            if (!s_f274630) s_f274630 = ppu_lookup(0x002747B8u);
+                        }
                         if (s_f274630 && (void*)tf == (void*)s_f274630) itl_probe_274630(ctx);
                     }
                     tf(ctx);
@@ -3855,6 +3859,36 @@ extern "C" int ps3_host_ncpu(void)
     }
     return (int)s_n;
 }
+static KAFFINITY ps3_get_ccd0_mask(int* p_num_l3)
+{
+    static KAFFINITY s_ccd_mask = 0;
+    static int s_l3_count = -1;
+    if (s_l3_count >= 0) {
+        if (p_num_l3) *p_num_l3 = s_l3_count;
+        return s_ccd_mask;
+    }
+    s_l3_count = 0;
+    s_ccd_mask = 0;
+    DWORD len = 0;
+    GetLogicalProcessorInformationEx(RelationCache, NULL, &len);
+    if (len > 0) {
+        unsigned char* cbuf = (unsigned char*)malloc(len);
+        if (cbuf && GetLogicalProcessorInformationEx(RelationCache, (PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX)cbuf, &len)) {
+            DWORD off = 0;
+            while (off < len) {
+                PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX info = (PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX)(cbuf + off);
+                if (info->Relationship == RelationCache && info->Cache.Level == 3) {
+                    if (s_l3_count == 0) s_ccd_mask = info->Cache.GroupMask.Mask;
+                    s_l3_count++;
+                }
+                off += info->Size;
+            }
+        }
+        if (cbuf) free(cbuf);
+    }
+    if (p_num_l3) *p_num_l3 = s_l3_count;
+    return s_ccd_mask;
+}
 extern "C" void ps3_thread_prefer_pcores(const char* who, int prio)
 {
     static int on = -1;
@@ -3875,6 +3909,7 @@ extern "C" void ps3_thread_prefer_pcores(const char* who, int prio)
     GSCSI gs = k ? (GSCSI)GetProcAddress(k, "GetSystemCpuSetInformation") : NULL;
     STSCS ss = k ? (STSCS)GetProcAddress(k, "SetThreadSelectedCpuSets") : NULL;
     int npc = 0, ntot = 0;
+    int is_multi_ccd = 0;
     if (gs && ss) {
         ULONG len = 0; gs(NULL, 0, &len, GetCurrentProcess(), 0);
         unsigned char* buf = (unsigned char*)malloc(len ? len : 1);
@@ -3886,11 +3921,27 @@ extern "C" void ps3_thread_prefer_pcores(const char* who, int prio)
                 o += c->Size;
             }
             ULONG ids[256];
+            int num_l3 = 0;
+            KAFFINITY ccd0_mask = ps3_get_ccd0_mask(&num_l3);
+            static int s_ccd_pin = -1;
+            if (s_ccd_pin < 0) { const char* eccd = getenv("PS3_CCD_PIN"); s_ccd_pin = (eccd && *eccd == '0') ? 0 : 1; }
+            is_multi_ccd = (maxc == minc && num_l3 > 1 && s_ccd_pin && ccd0_mask != 0);
+
             if (maxc != minc && s_pmin > 0 && v242b_pm) {   /* v242B: P / other logical CPUs inside the process affinity */
                 for (ULONG o = 0; o < len; ) {
                     PSYSTEM_CPU_SET_INFORMATION c = (PSYSTEM_CPU_SET_INFORMATION)(buf + o);
                     if (c->Type == CpuSetInformation && c->CpuSet.Group == 0 && c->CpuSet.LogicalProcessorIndex < 8 * sizeof(DWORD_PTR) &&
                         ((v242b_pm >> c->CpuSet.LogicalProcessorIndex) & 1)) { if (c->CpuSet.EfficiencyClass == maxc) v242b_pin++; else v242b_oin++; }
+                    o += c->Size;
+                }
+                if (v242b_pin < s_pmin || v242b_oin == 0) v242b_skip = 1;
+            } else if (is_multi_ccd && s_pmin > 0 && v242b_pm) {
+                for (ULONG o = 0; o < len; ) {
+                    PSYSTEM_CPU_SET_INFORMATION c = (PSYSTEM_CPU_SET_INFORMATION)(buf + o);
+                    if (c->Type == CpuSetInformation && c->CpuSet.Group == 0 && c->CpuSet.LogicalProcessorIndex < 8 * sizeof(DWORD_PTR) &&
+                        ((v242b_pm >> c->CpuSet.LogicalProcessorIndex) & 1)) {
+                        if ((ccd0_mask >> c->CpuSet.LogicalProcessorIndex) & 1) v242b_pin++; else v242b_oin++;
+                    }
                     o += c->Size;
                 }
                 if (v242b_pin < s_pmin || v242b_oin == 0) v242b_skip = 1;
@@ -3902,6 +3953,14 @@ extern "C" void ps3_thread_prefer_pcores(const char* who, int prio)
                     o += c->Size;
                 }
                 if (npc) ss(GetCurrentThread(), ids, (ULONG)npc);
+            } else if (is_multi_ccd && !v242b_skip) {
+                for (ULONG o = 0; o < len; ) {
+                    PSYSTEM_CPU_SET_INFORMATION c = (PSYSTEM_CPU_SET_INFORMATION)(buf + o);
+                    if (c->Type == CpuSetInformation && c->CpuSet.Group == 0 &&
+                        ((ccd0_mask >> c->CpuSet.LogicalProcessorIndex) & 1) && npc < 256) ids[npc++] = c->CpuSet.Id;
+                    o += c->Size;
+                }
+                if (npc) ss(GetCurrentThread(), ids, (ULONG)npc);
             }
         }
         free(buf);
@@ -3910,9 +3969,12 @@ extern "C" void ps3_thread_prefer_pcores(const char* who, int prio)
     if (v242b_skip)
         fprintf(stderr, "[PCORE] %s thread (hosttid %lu): v242B no P-core restriction: affinity holds %d P-core + %d other logical CPUs (PS3_PCORE_MIN %d), priority %d%c",
                 who, (unsigned long)GetCurrentThreadId(), v242b_pin, v242b_oin, s_pmin, prio, 10);
+    else if (is_multi_ccd)
+        fprintf(stderr, "[PCORE] %s thread (hosttid %lu): %d of %d logical CPUs are in CCD 0 (Zen multi-CCD L3 cache 0)%s, priority %d%c",
+                who, (unsigned long)GetCurrentThreadId(), npc, ntot, npc ? " -> restricted to them" : " (skipped)", prio, 10);
     else
-    fprintf(stderr, "[PCORE] %s thread (hosttid %lu): %d of %d logical CPUs are performance cores%s, priority %d%c",
-            who, (unsigned long)GetCurrentThreadId(), npc, ntot, npc ? " -> restricted to them" : " (not hybrid)", prio, 10);
+        fprintf(stderr, "[PCORE] %s thread (hosttid %lu): %d of %d logical CPUs are performance cores%s, priority %d%c",
+                who, (unsigned long)GetCurrentThreadId(), npc, ntot, npc ? " -> restricted to them" : " (not hybrid)", prio, 10);
 }
 /* v127: pin (want=1: same as ps3_thread_prefer_pcores) or unpin (want=0: all CPUs, NORMAL priority) the CALLING
  * thread -- for in-run A/B phases that move a thread on/off the P-cores. */
@@ -4135,8 +4197,15 @@ static int mc_reserve_for_current_thread(const char* who, int abph, int abx)
         if (c->Type == CpuSetInformation && c->CpuSet.Group == 0 && c->CpuSet.LogicalProcessorIndex == 0) core0 = c->CpuSet.CoreIndex;
         o += c->Size; }
     int best = -1, best_sc = -1;
+    int num_l3 = 0;
+    KAFFINITY ccd0_mask = ps3_get_ccd0_mask(&num_l3);
+    static int s_ccd_pin_mc = -1;
+    if (s_ccd_pin_mc < 0) { const char* eccd = getenv("PS3_CCD_PIN"); s_ccd_pin_mc = (eccd && *eccd == '0') ? 0 : 1; }
+    const int prefer_ccd0 = (num_l3 > 1 && s_ccd_pin_mc && ccd0_mask != 0);
+
     for (ULONG o = 0; o < len; ) { PSYSTEM_CPU_SET_INFORMATION c = (PSYSTEM_CPU_SET_INFORMATION)(buf + o);
         if (c->Type == CpuSetInformation && c->CpuSet.Group == 0 && c->CpuSet.EfficiencyClass == maxc &&
+            (!prefer_ccd0 || ((ccd0_mask >> c->CpuSet.LogicalProcessorIndex) & 1)) &&
             ((pm >> c->CpuSet.LogicalProcessorIndex) & 1) && !((s_mc_taken >> c->CpuSet.LogicalProcessorIndex) & 1)) {
             const int ci = c->CpuSet.CoreIndex, sc = c->CpuSet.SchedulingClass;
             if (force >= 0) { if (ci == force) best = ci; }

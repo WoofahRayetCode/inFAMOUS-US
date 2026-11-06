@@ -4,10 +4,10 @@
   "system": "PS3",
   "type": "recomp",
   "original": {
-    "region": "Europe",
-    "serial": "BCES00220"
+    "region": "North America",
+    "serial": "BCUS98119"
   },
-  "project": "inFamous PC",
+  "project": "inFamous PC (US)",
   "status": "playable",
   "targets": ["Windows"],
   "toolchain": "Ps3recomp",
@@ -18,5 +18,5 @@
       "link": "https://github.com/whompay"
     }
   ],
-  "notes": "Native Windows port built from the player's own European BCES00220 or US BCUS98119 (experimental) disc dump; no game code or data is distributed."
+  "notes": "Native Windows port built from the player's own US BCUS98119 disc dump; no game code or data is distributed."
 }

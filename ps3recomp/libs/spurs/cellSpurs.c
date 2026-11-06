@@ -2412,7 +2412,7 @@ static u32 spurs_hot_wids(void)
     static int done = 0; static u32 m = 0;
     if (!done) {
         const char* e = getenv("SPURS_HOT_WIDS");
-        if (!e) e = "2,6,9";
+        if (!e) e = "0,1,2,6,9";
         if (*e && *e != '-') { const char* q = e;
             while (*q) { while (*q == ',' || *q == ' ') q++; if (!*q) break;
                 int w = atoi(q); if (w >= 0 && w < 16) m |= 1u << w;
@@ -2705,7 +2705,7 @@ static u32 spurs_pcore_mask(void)
     static int done = 0; static u32 m = 0;
     if (!done) {
         const char* e = getenv("SPURS_PCORE_WIDS");
-        if (!e) e = "-";
+        if (!e) e = "0,1,2,6";
         if (*e && *e != '-') { const char* q = e;
             while (*q) { while (*q == ',' || *q == ' ') q++; if (!*q) break;
                 int w = atoi(q); if (w >= 0 && w < 16) m |= 1u << w;
@@ -2756,6 +2756,36 @@ static int b225_ideal_bit(void)
     }
     return en ? bit : -1;
 }
+static KAFFINITY spurs_get_ccd0_mask(int* p_num_l3)
+{
+    static KAFFINITY s_ccd_mask = 0;
+    static int s_l3_count = -1;
+    if (s_l3_count >= 0) {
+        if (p_num_l3) *p_num_l3 = s_l3_count;
+        return s_ccd_mask;
+    }
+    s_l3_count = 0;
+    s_ccd_mask = 0;
+    DWORD len = 0;
+    GetLogicalProcessorInformationEx(RelationCache, NULL, &len);
+    if (len > 0) {
+        unsigned char* cbuf = (unsigned char*)malloc(len);
+        if (cbuf && GetLogicalProcessorInformationEx(RelationCache, (PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX)cbuf, &len)) {
+            DWORD off = 0;
+            while (off < len) {
+                PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX info = (PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX)(cbuf + off);
+                if (info->Relationship == RelationCache && info->Cache.Level == 3) {
+                    if (s_l3_count == 0) s_ccd_mask = info->Cache.GroupMask.Mask;
+                    s_l3_count++;
+                }
+                off += info->Size;
+            }
+        }
+        if (cbuf) free(cbuf);
+    }
+    if (p_num_l3) *p_num_l3 = s_l3_count;
+    return s_ccd_mask;
+}
 static PROCESSOR_NUMBER s_b225_pc[256]; static volatile long s_b225_npc = -1; static volatile long s_b225_rr = 0;
 static void b225_ideal_init(void)
 {
@@ -2772,7 +2802,13 @@ static void b225_ideal_init(void)
             for (ULONG o = 0; o < len; ) { PSYSTEM_CPU_SET_INFORMATION c = (PSYSTEM_CPU_SET_INFORMATION)(buf + o);
                 if (c->Type == CpuSetInformation) { BYTE ec = c->CpuSet.EfficiencyClass; if (ec > maxc) maxc = ec; if (ec < minc) minc = ec; }
                 o += c->Size; }
-            if (maxc != minc)
+            int num_l3 = 0;
+            KAFFINITY ccd0_mask = spurs_get_ccd0_mask(&num_l3);
+            static int s_ccd_pin_b = -1;
+            if (s_ccd_pin_b < 0) { const char* e = getenv("PS3_CCD_PIN"); s_ccd_pin_b = (e && *e == '0') ? 0 : 1; }
+            const int is_multi_ccd = (maxc == minc && num_l3 > 1 && s_ccd_pin_b && ccd0_mask != 0);
+
+            if (maxc != minc) {
                 for (int pass = 0; pass < 2; pass++) {   /* pass 0: first logical CPU of each P-core, pass 1: the siblings */
                     BYTE seen[256]; memset(seen, 0, sizeof seen);
                     for (ULONG o = 0; o < len; ) { PSYSTEM_CPU_SET_INFORMATION c = (PSYSTEM_CPU_SET_INFORMATION)(buf + o);
@@ -2783,6 +2819,19 @@ static void b225_ideal_init(void)
                                                         s_b225_pc[n].Reserved = 0; n++; } }
                         o += c->Size; }
                 }
+            } else if (is_multi_ccd) {
+                for (int pass = 0; pass < 2; pass++) {
+                    BYTE seen[256]; memset(seen, 0, sizeof seen);
+                    for (ULONG o = 0; o < len; ) { PSYSTEM_CPU_SET_INFORMATION c = (PSYSTEM_CPU_SET_INFORMATION)(buf + o);
+                        if (c->Type == CpuSetInformation && c->CpuSet.Group == 0 &&
+                            ((ccd0_mask >> c->CpuSet.LogicalProcessorIndex) & 1) && n < 256 &&
+                            (!v242a_aff_on() || v242a_cpu_in_aff(c->CpuSet.Group, c->CpuSet.LogicalProcessorIndex))) {
+                            const BYTE ci = c->CpuSet.CoreIndex; const int first = !seen[ci]; seen[ci] = 1;
+                            if ((pass == 0) == first) { s_b225_pc[n].Group = c->CpuSet.Group; s_b225_pc[n].Number = c->CpuSet.LogicalProcessorIndex;
+                                                        s_b225_pc[n].Reserved = 0; n++; } }
+                        o += c->Size; }
+                }
+            }
         }
         free(buf);
     }
@@ -2829,10 +2878,10 @@ static void b225_ideal_sync(int placed) { (void)placed; }
 static void spurs_v97_pcore_sync(u32 wid, const char* who)
 {
     if (wid >= 16) return;
-    /* v133 ABX 0x20 (was 0x10 in v133a): w2 (BatchJobList -- the main thread's per-frame hidden job wait, ~75-80% SPU interpreter, lanes
-     * unpinned so they can land on E-cores) runs its kernel/lane threads on the P-cores at ABOVE_NORMAL in that bit. */
+    /* v133 ABX 0x20: w2 (BatchJobList -- character animation/skinning/cloth WWS jobs on the critical path)
+     * runs its kernel/lane threads on P-cores / CCD0 at ABOVE_NORMAL priority. */
     if (wid == 2 && !((spurs_pcore_mask() >> wid) & 1)) {
-        const int want = (g_abx & 0x400) != 0;   /* v138: w2 pin moved off ABX 0x20 (measured ~0; 0x20 = audio lag) */
+        const int want = 1;
         if (want && t_v97_pc == 0) { t_v97_pc = 3; spurs_v97_pcore_apply(wid, who, 1); }
         else if (!want && t_v97_pc == 3) { t_v97_pc = 0; spurs_v97_pcore_apply(wid, who, 0); }
         return;
@@ -2863,6 +2912,7 @@ static void spurs_v97_pcore_apply(u32 wid, const char* who, int want)
     typedef BOOL (WINAPI *GSCSI)(PSYSTEM_CPU_SET_INFORMATION, ULONG, PULONG, HANDLE, ULONG);
     typedef BOOL (WINAPI *STSCS)(HANDLE, const ULONG*, ULONG);
     static ULONG s_ids[256]; static volatile long s_n = -1;
+    static int s_is_mccd = 0;
     HMODULE k = GetModuleHandleA("kernel32.dll");
     STSCS ss = k ? (STSCS)GetProcAddress(k, "SetThreadSelectedCpuSets") : NULL;
     if (s_n < 0) {
@@ -2876,27 +2926,41 @@ static void spurs_v97_pcore_apply(u32 wid, const char* who, int want)
                 for (ULONG o = 0; o < len; ) { PSYSTEM_CPU_SET_INFORMATION c = (PSYSTEM_CPU_SET_INFORMATION)(buf + o);
                     if (c->Type == CpuSetInformation) { BYTE ec = c->CpuSet.EfficiencyClass; if (ec > maxc) maxc = ec; if (ec < minc) minc = ec; }
                     o += c->Size; }
-                if (maxc != minc)
+                int num_l3 = 0;
+                KAFFINITY ccd0_mask = spurs_get_ccd0_mask(&num_l3);
+                static int s_ccd_pin_a = -1;
+                if (s_ccd_pin_a < 0) { const char* e = getenv("PS3_CCD_PIN"); s_ccd_pin_a = (e && *e == '0') ? 0 : 1; }
+                s_is_mccd = (maxc == minc && num_l3 > 1 && s_ccd_pin_a && ccd0_mask != 0);
+
+                if (maxc != minc) {
                     for (ULONG o = 0; o < len; ) { PSYSTEM_CPU_SET_INFORMATION c = (PSYSTEM_CPU_SET_INFORMATION)(buf + o);
                         if (c->Type == CpuSetInformation && c->CpuSet.EfficiencyClass == maxc && n < 256 &&
                             (!v242a_aff_on() || v242a_cpu_in_aff(c->CpuSet.Group, c->CpuSet.LogicalProcessorIndex))) s_ids[n++] = c->CpuSet.Id;   /* v242A V242A_AFF */
                         o += c->Size; }
+                } else if (s_is_mccd) {
+                    for (ULONG o = 0; o < len; ) { PSYSTEM_CPU_SET_INFORMATION c = (PSYSTEM_CPU_SET_INFORMATION)(buf + o);
+                        if (c->Type == CpuSetInformation && c->CpuSet.Group == 0 &&
+                            ((ccd0_mask >> c->CpuSet.LogicalProcessorIndex) & 1) && n < 256 &&
+                            (!v242a_aff_on() || v242a_cpu_in_aff(c->CpuSet.Group, c->CpuSet.LogicalProcessorIndex))) s_ids[n++] = c->CpuSet.Id;
+                        o += c->Size; }
+                }
             }
             free(buf);
         }
         if (n > 0 && v242a_aff_on()) {   /* v242A V242A_AFF: too few P-core CPUs in the affinity -> no P-core restriction */
             const char* e = getenv("V242A_PCORE_MIN"); const long mn = (e && *e) ? atol(e) : 8;
-            if (n < mn) { fprintf(stderr, "[PCORE] v242A only %ld P-core CPUs in the affinity (< V242A_PCORE_MIN %ld): SPURS P-core sets off\n", n, mn); n = 0; }
+            if (n < mn) { fprintf(stderr, "[PCORE] v242A only %ld %s CPUs in the affinity (< V242A_PCORE_MIN %ld): SPURS P-core sets off\n", n, s_is_mccd ? "CCD0" : "P-core", mn); n = 0; }
         }
         s_n = n;
     }
-    const int v221_all = want && v221a_place();   /* v221A V221A_PLACE: ABOVE_NORMAL on every CPU */
+    const int v221_all = want && v221a_place() && !s_is_mccd;   /* v221A V221A_PLACE: ABOVE_NORMAL on every CPU (disabled on multi-CCD to preserve CCD0 L3 cache) */
     if (ss && s_n > 0) { if (want && !v221_all) ss(GetCurrentThread(), s_ids, (ULONG)s_n); else ss(GetCurrentThread(), NULL, 0); }
     SetThreadPriority(GetCurrentThread(), want ? THREAD_PRIORITY_ABOVE_NORMAL : THREAD_PRIORITY_NORMAL);
     static volatile long s_logged = 0;
     if (s_logged < 48) { s_logged++;
-        fprintf(stderr, "[PCORE] v97f %s w%u hosttid %lu: %s (%ld P-core CPUs)\n", who, wid, (unsigned long)GetCurrentThreadId(),
-                v221_all ? "-> ALL CPUs, ABOVE_NORMAL (v221A V221A_PLACE)" : want ? "-> P-cores, ABOVE_NORMAL" : "-> all CPUs, NORMAL", (long)s_n); }
+        fprintf(stderr, "[PCORE] v97f %s w%u hosttid %lu: %s (%ld %s CPUs)\n", who, wid, (unsigned long)GetCurrentThreadId(),
+                v221_all ? "-> ALL CPUs, ABOVE_NORMAL (v221A V221A_PLACE)" : want ? (s_is_mccd ? "-> CCD 0, ABOVE_NORMAL" : "-> P-cores, ABOVE_NORMAL") : "-> all CPUs, NORMAL", (long)s_n,
+                s_is_mccd ? "CCD0" : "P-core"); }
 #else
     (void)who; (void)wid; (void)want;
 #endif

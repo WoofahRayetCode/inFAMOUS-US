@@ -550,6 +550,8 @@ static const char* find_default_elf(const char* argv0)
     if (fslash > slash) slash = fslash;
     if (slash) *slash = 0; else strcpy(dir, ".");
     static const char* rel[] = {
+        "/../../Infamous (US)/PS3_GAME/USRDIR/EBOOT.elf",
+        "/../Infamous (US)/PS3_GAME/USRDIR/EBOOT.elf",
         "/../../Infamous (Europe) (Fr,De,Es,It,Nl)/PS3_GAME/USRDIR/EBOOT.elf",
         "/../Infamous (Europe) (Fr,De,Es,It,Nl)/PS3_GAME/USRDIR/EBOOT.elf",
     };

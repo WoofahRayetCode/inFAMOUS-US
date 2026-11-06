@@ -1,4 +1,4 @@
-//! infamous-installer: builds the inFamous (BCES00220) PC recompilation from the player's own
+//! infamous-installer: builds the inFamous (US BCUS98119 / BCES00220) PC recompilation from the player's own
 //! copy of the game. No game code or data ships with the port; this tool regenerates it.
 //!
 //!   infamous-installer                       interactive install (double-click)
@@ -713,6 +713,7 @@ fn write_launcher(s: &Session, vars: &Vars, exe: &Path, elf: &Path) -> Result<Pa
         t.push_str("if errorlevel 1 (\r\n  echo The game exited with an error. Logs are in the folder above.\r\n  pause\r\n)\r\n");
         let p = s.root.join(format!("{}.cmd", s.m.launch_name));
         util::write_file(&p, t.as_bytes())?;
+        write_dred_script(s, vars, exe, elf, &cwd)?;
         Ok(p)
     } else {
         let mut t = String::from("#!/bin/sh\n# Created by infamous-installer.\n");
@@ -744,6 +745,34 @@ fn write_launcher(s: &Session, vars: &Vars, exe: &Path, elf: &Path) -> Result<Pa
         }
         Ok(p)
     }
+}
+
+/// `play-dred.cmd`: the play script with `D3D12_DRED=1`. When the GPU drops out (DLAA on an RTX 5060
+/// Laptop hung on inFamous' first in-world frame), the port's device-removed report names the reason
+/// and the command list / operation the device stopped at (d3d12_dred_report in
+/// rsx_d3d12_backend.c). Own logs, so a normal run's play.err.log stays as it was.
+fn write_dred_script(s: &Session, vars: &Vars, exe: &Path, elf: &Path, cwd: &str) -> Result<()> {
+    let mut t = String::from(
+        "@echo off\r\n\
+         rem Created by infamous-installer: the play script with D3D12_DRED=1 (Direct3D 12 device-removed\r\n\
+         rem debugger). Use it when the game loses the GPU: play-dred.err.log then has the removal reason\r\n\
+         rem and the command list and operation the device stopped at.\r\n\
+         setlocal\r\n",
+    );
+    t.push_str(&format!("cd /d \"{cwd}\"\r\n"));
+    for (k, v) in &s.m.launch_env {
+        t.push_str(&format!("set \"{k}={}\"\r\n", vars.expand(v)?));
+    }
+    t.push_str("set \"D3D12_DRED=1\"\r\n");
+    t.push_str(&format!(
+        "\"{}\" \"{}\" > \"play-dred.out.log\" 2> \"play-dred.err.log\"\r\n",
+        exe.display(),
+        elf.display()
+    ));
+    t.push_str(
+        "if errorlevel 1 (\r\n  echo The game exited with an error. See play-dred.err.log.\r\n  pause\r\n)\r\n",
+    );
+    util::write_file(&s.root.join("play-dred.cmd"), t.as_bytes())
 }
 
 /// `installer/launch.txt`: what the no-console launcher (`inFamous.exe`) starts. Paths inside the
