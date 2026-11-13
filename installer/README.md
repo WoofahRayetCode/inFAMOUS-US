@@ -4,7 +4,13 @@ Builds the inFamous (US `BCUS98119` / European `BCES00220`) PC port from the pla
 repository holds no game code and no game data. The installer regenerates all of it from the
 player's dump, applies the region-specific patches (from `installer/regions/BCUS98119/`), compiles it and writes a launcher.
 
-It's written in Rust with no dependencies, so it builds offline with a plain Rust toolchain:
+It's written in Rust. The default `gui` feature enables `eframe` and `rfd` for the setup
+window; Windows builds also depend on `windows-sys` for the launcher dialog. Building with
+`--no-default-features` omits the setup GUI and its dependencies, but Windows builds still
+require `windows-sys`. See `Cargo.toml` for the dependency versions and enabled features.
+
+Offline builds require the Rust toolchain and all required Cargo dependencies to be available
+locally. Otherwise, Cargo needs network access to download missing dependencies. Build with:
 
 ```bat
 cd installer
