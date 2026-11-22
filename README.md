@@ -52,9 +52,13 @@ your PC. When the build finishes, click **Play**. [Setup details](installer/READ
 
 ## Updating
 
-Run `Update inFamous (US).cmd` in the root folder. The updater pulls changed files from `main`,
-including the installer and launcher from the latest successful Setup app build published to
-`main`, and recompiles only what changed. Release downloads are available on
+The launcher checks for updates in the background when it opens. Use **Update** to check
+manually, or select **Update available** to open **What's New** before choosing **Install Update**.
+The launcher shows the download and build progress, then restarts when the update finishes.
+
+You can also run `Update inFamous (US).cmd` in the root folder. Both routes pull changed
+files from `main`, including the installer and launcher published by the Setup app workflow,
+and recompile only what changed. Release downloads are available on
 [GitHub Releases](https://github.com/WoofahRayetCode/inFAMOUS-US/releases).
 
 ## Building manually
@@ -102,7 +106,7 @@ windowed mode.
 
 The launcher opens on **Play** with the detected region, installation status, and quick display
 settings. **Display & Controls** has the full settings list. **Support** opens the current
-and previous game logs, copies build details, and checks GitHub for updates.
+and previous game logs and copies build details.
 
 ### Achievements
 

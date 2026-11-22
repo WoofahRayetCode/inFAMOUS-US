@@ -46,6 +46,7 @@ OPTIONS
   --keep-fresh      (make-patches) reuse .installer/fresh from the last run
   -y, --yes         don't ask questions; fail instead
   --check           (update) only report whether an update is available
+  --expect-commit SHA (update) apply only if the branch is still at the reviewed commit
   --repo OWNER/NAME (update) repository to update from (default: [update] in infamous.toml)
   --branch NAME     (update) branch to update from (default: [update] branch, else main)
   --iso FILE        (extract-iso) the disc image
@@ -74,6 +75,7 @@ struct Opts {
     yes: bool,
     interactive: bool,
     check: bool,
+    expect_commit: Option<String>,
     repo: Option<String>,
     branch: Option<String>,
     /// (install, set by update) keep the timestamps of generated files whose content did not
@@ -129,6 +131,13 @@ fn parse_args() -> Result<Opts> {
             "--keep-fresh" => o.keep_fresh = true,
             "-y" | "--yes" => o.yes = true,
             "--check" => o.check = true,
+            "--expect-commit" => {
+                let commit = val(&mut i, &a)?;
+                if !update::is_commit_sha(&commit) {
+                    bail!("--expect-commit needs a full 40-character Git commit SHA");
+                }
+                o.expect_commit = Some(commit);
+            }
             "--repo" => o.repo = Some(val(&mut i, &a)?),
             "--branch" => o.branch = Some(val(&mut i, &a)?),
             _ if !a.starts_with('-') && o.game.is_none() && Path::new(&a).exists() => {
@@ -140,6 +149,9 @@ fn parse_args() -> Result<Opts> {
     }
     if o.cmd.is_empty() {
         o.cmd = "install".into();
+    }
+    if o.expect_commit.is_some() && o.cmd != "update" && o.cmd != "help" {
+        bail!("--expect-commit applies to the update command");
     }
     Ok(o)
 }
@@ -624,10 +636,14 @@ fn cmd_update(s: &Session) -> Result<()> {
         remote.repo, remote.branch
     ));
     let plan = update::plan(&s.root, &s.m, &remote)?;
+    if let Some(expected) = &s.o.expect_commit {
+        if !plan.commit.eq_ignore_ascii_case(expected) {
+            bail!("the update changed since review. Check for updates again to review the new version.");
+        }
+    }
     let short = &plan.commit[..10];
-    let pending_marker = s.root.join(".installer").join("update.pending");
-    let pending = pending_marker.is_file();
-    let upscalers_pending = upscalers::needs_provisioning(&s.root);
+    let pending_marker = update::pending_marker(&s.root);
+    let availability = plan.availability(&s.root);
     if plan.is_empty() {
         util::info(&format!("Already up to date (version {short})."));
     } else {
@@ -643,10 +659,10 @@ fn cmd_update(s: &Session) -> Result<()> {
         // One machine-readable line for the setup program.
         println!(
             "UPDATE-CHECK {} {} {} {}",
-            if plan.is_empty() && !pending && !upscalers_pending {
-                "current"
-            } else {
+            if availability.available {
                 "available"
+            } else {
+                "current"
             },
             plan.commit,
             plan.fetch.len(),
@@ -654,7 +670,7 @@ fn cmd_update(s: &Session) -> Result<()> {
         );
         return Ok(());
     }
-    if plan.is_empty() && !pending && !upscalers_pending {
+    if !availability.available {
         util::heading("Done");
         util::info("Nothing to do.");
         return Ok(());
@@ -665,7 +681,7 @@ fn cmd_update(s: &Session) -> Result<()> {
         util::write_file(&pending_marker, plan.commit.as_bytes())?;
         update::apply(&s.root, &remote, &plan, &mut |l| util::info(&l))?;
         util::info(&format!("Files updated to version {short}."));
-    } else if pending {
+    } else if availability.pending_rebuild {
         util::info(
             "The files are current, but the last update did not finish building; building now.",
         );

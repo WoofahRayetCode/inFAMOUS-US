@@ -1,6 +1,6 @@
 use super::*;
 use eframe::egui::{self, Color32, RichText};
-use infamous_installer::{game, lock, manifest::Manifest, setup, trophy};
+use infamous_installer::{game, lock, setup, trophy, update};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     mpsc, Arc,
@@ -38,11 +38,59 @@ struct Dashboard {
     save_transaction: Option<SaveTransaction>,
     trophy_catalog: Option<Result<trophy::Catalog, String>>,
     trophy_progress: Result<BTreeMap<u32, u64>, String>,
-    update_check: Option<mpsc::Receiver<Result<setup::UpdateInfo, String>>>,
-    update_result: Option<Result<setup::UpdateInfo, String>>,
+    update: UpdateState,
 }
 
 use infamous_installer::save_manager;
+
+enum UpdateState {
+    Disabled,
+    Idle,
+    Checking {
+        completion: mpsc::Receiver<Result<update::Preview, String>>,
+        manual: bool,
+        open_review: bool,
+    },
+    Checked {
+        result: Result<update::Preview, String>,
+        manual: bool,
+    },
+    Reviewing(update::Preview),
+    Installing {
+        installer: setup::Installer,
+        launcher: PathBuf,
+    },
+    Failed {
+        error: String,
+        log: String,
+    },
+    RestartFailed {
+        launcher: PathBuf,
+        error: String,
+    },
+}
+
+impl UpdateState {
+    fn blocks_dashboard(&self) -> bool {
+        matches!(
+            self,
+            Self::Reviewing(_)
+                | Self::Installing { .. }
+                | Self::Failed { .. }
+                | Self::RestartFailed { .. }
+        )
+    }
+
+    fn defer_review(&mut self) {
+        if let Self::Checking { open_review, .. } = self {
+            *open_review = false;
+        }
+    }
+}
+
+fn short_commit(commit: &str) -> String {
+    commit.chars().take(12).collect()
+}
 
 enum Snapshot {
     Backup(Scope),
@@ -152,7 +200,8 @@ impl Dashboard {
         } else {
             Tab::Play
         };
-        Self {
+        let installed = !state.launch.settings_only && setup::is_installed(&state.launch.root);
+        let mut dashboard = Self {
             state,
             tab,
             played,
@@ -168,9 +217,16 @@ impl Dashboard {
             save_transaction: None,
             trophy_catalog: None,
             trophy_progress: Ok(BTreeMap::new()),
-            update_check: None,
-            update_result: None,
+            update: if installed {
+                UpdateState::Idle
+            } else {
+                UpdateState::Disabled
+            },
+        };
+        if installed {
+            dashboard.start_update_check(ctx, false);
         }
+        dashboard
     }
 
     fn region_label(&self) -> &str {
@@ -359,9 +415,10 @@ impl Dashboard {
     }
 
     fn start_save_transaction(&mut self, ctx: &egui::Context, snapshot: Snapshot) {
-        if self.save_transaction.is_some() {
+        if self.save_transaction.is_some() || self.update.blocks_dashboard() {
             return;
         }
+        self.update.defer_review();
         let progress = match snapshot {
             Snapshot::Backup(_) => "Creating backup...",
             Snapshot::Restore(..) => "Restoring backup...",
@@ -538,6 +595,7 @@ impl Dashboard {
                         .clicked()
                     {
                         if let Some(name) = self.backup.clone() {
+                            self.update.defer_review();
                             self.restore = Some((name, self.scope));
                         }
                     }
@@ -636,6 +694,298 @@ impl Dashboard {
         });
     }
 
+    fn start_update_check(&mut self, ctx: &egui::Context, manual: bool) {
+        let root = self.state.launch.root.clone();
+        let ctx = ctx.clone();
+        let (send, completion) = mpsc::channel();
+        let worker = std::thread::Builder::new().spawn(move || {
+            let _ = send.send(update::preview(&root).map_err(|error| error.to_string()));
+            ctx.request_repaint();
+        });
+        self.update = match worker {
+            Ok(_) => UpdateState::Checking {
+                completion,
+                manual,
+                open_review: manual,
+            },
+            Err(error) => UpdateState::Checked {
+                result: Err(format!("Could not start the update check: {error}")),
+                manual,
+            },
+        };
+    }
+
+    fn poll_update(&mut self, ctx: &egui::Context) {
+        match &self.update {
+            UpdateState::Checking {
+                completion,
+                manual,
+                open_review,
+            } => {
+                let result = match completion.try_recv() {
+                    Ok(result) => result,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        Err("The update check stopped unexpectedly.".into())
+                    }
+                    Err(mpsc::TryRecvError::Empty) => return,
+                };
+                self.update = match result {
+                    Ok(preview)
+                        if preview.available
+                            && *open_review
+                            && self.restore.is_none()
+                            && self.save_transaction.is_none()
+                            && !ctx.memory(|m| m.any_popup_open())
+                            && !ctx.input(|i| i.viewport().close_requested()) =>
+                    {
+                        self.notice = None;
+                        UpdateState::Reviewing(preview)
+                    }
+                    result => UpdateState::Checked {
+                        result,
+                        manual: *manual,
+                    },
+                };
+            }
+            UpdateState::Installing {
+                installer,
+                launcher,
+            } => {
+                let progress = installer.progress.lock().unwrap();
+                match progress.done.as_ref() {
+                    Some(Ok(())) => {
+                        let launcher = launcher.clone();
+                        drop(progress);
+                        self.restart_launcher(ctx, launcher);
+                    }
+                    Some(Err(error)) => {
+                        let error = error.clone();
+                        let log = progress.log.join("\n");
+                        drop(progress);
+                        self.update = UpdateState::Failed { error, log };
+                    }
+                    None => {}
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn restart_launcher(&mut self, ctx: &egui::Context, launcher: PathBuf) {
+        let result = Command::new(&launcher)
+            .current_dir(&self.state.launch.root)
+            .spawn();
+        match result {
+            Ok(_) => {
+                self.update = UpdateState::Disabled;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            Err(error) => {
+                self.update = UpdateState::RestartFailed {
+                    launcher,
+                    error: error.to_string(),
+                };
+            }
+        }
+    }
+
+    fn update_button(&mut self, ui: &mut egui::Ui) {
+        if matches!(self.update, UpdateState::Disabled) {
+            return;
+        }
+        let available =
+            matches!(&self.update, UpdateState::Checked { result: Ok(info), .. } if info.available);
+        let checking = matches!(self.update, UpdateState::Checking { .. });
+        let label = if available {
+            RichText::new("Update available").color(AMBER).strong()
+        } else if checking {
+            RichText::new("Checking for updates…")
+        } else {
+            RichText::new("Update")
+        };
+        if ui
+            .add_enabled(
+                !checking && self.save_transaction.is_none(),
+                egui::Button::new(label),
+            )
+            .on_hover_text(if available {
+                "Review what's new"
+            } else {
+                "Check for updates"
+            })
+            .clicked()
+        {
+            let prior = std::mem::replace(&mut self.update, UpdateState::Idle);
+            match prior {
+                UpdateState::Checked {
+                    result: Ok(preview),
+                    ..
+                } if preview.available => {
+                    self.notice = None;
+                    self.update = UpdateState::Reviewing(preview);
+                }
+                _ => self.start_update_check(ui.ctx(), true),
+            }
+        }
+    }
+
+    fn update_status(&self, ui: &mut egui::Ui) {
+        match &self.update {
+            UpdateState::Checked {
+                result: Ok(info),
+                manual: true,
+            } if !info.available => {
+                muted(ui, format!("Up to date ({})", short_commit(&info.commit)));
+            }
+            UpdateState::Checked {
+                result: Err(error),
+                manual: true,
+            } => {
+                let message = format!("Could not check for updates. {error}");
+                ui.add(egui::Label::new(RichText::new(&message).color(AMBER)).truncate())
+                    .on_hover_text(message);
+            }
+            _ => {}
+        }
+    }
+
+    fn show_update_window(&mut self, ctx: &egui::Context) {
+        let window = |title| {
+            egui::Window::new(title)
+                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                .resizable(false)
+                .collapsible(false)
+        };
+        match &self.update {
+            UpdateState::Reviewing(preview) => {
+                let mut dismiss = false;
+                let mut install = false;
+                let mut save = false;
+                window("What's New").show(ctx, |ui| {
+                    ui.set_width(480.0);
+                    muted(ui, format!("Update {}", short_commit(&preview.commit)));
+                    if let Some(status) = &preview.notes_status {
+                        muted(ui, status);
+                    }
+                    if !preview.changes.is_empty() {
+                        egui::ScrollArea::vertical()
+                            .max_height(260.0)
+                            .show(ui, |ui| {
+                                for change in &preview.changes {
+                                    ui.label(format!("• {change}"));
+                                }
+                            });
+                    } else if preview.notes_status.is_none() {
+                        muted(ui, "Change notes are unavailable for this update.");
+                    }
+                    ui.separator();
+                    if self.state.dirty() {
+                        muted(
+                            ui,
+                            "Save your settings changes before installing the update.",
+                        );
+                        save = ui.button("Save settings").clicked();
+                    }
+                    if let Some((error, true)) = &self.notice {
+                        ui.colored_label(AMBER, error);
+                    }
+                    ui.horizontal(|ui| {
+                        dismiss = ui.button("Later").clicked();
+                        let button = egui::Button::new(
+                            RichText::new("Install Update").strong().color(BACKGROUND),
+                        )
+                        .fill(BLUE);
+                        install = ui.add_enabled(!self.state.dirty(), button).clicked();
+                    });
+                });
+                if dismiss
+                    || ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+                {
+                    let prior = std::mem::replace(&mut self.update, UpdateState::Idle);
+                    if let UpdateState::Reviewing(preview) = prior {
+                        self.update = UpdateState::Checked {
+                            result: Ok(preview),
+                            manual: false,
+                        };
+                    }
+                } else if install {
+                    match std::env::current_exe() {
+                        Ok(launcher) => {
+                            let repaint = ctx.clone();
+                            let installer = setup::Installer::start_launcher_update(
+                                self.state.launch.root.clone(),
+                                preview.commit.clone(),
+                                Arc::new(move || repaint.request_repaint()),
+                            );
+                            self.update = UpdateState::Installing {
+                                installer,
+                                launcher,
+                            };
+                        }
+                        Err(error) => {
+                            self.notify(Err(format!("Could not locate the launcher: {error}")))
+                        }
+                    }
+                } else if save {
+                    let result = self.state.save().map(|()| "Settings saved.".into());
+                    self.notify(result);
+                }
+            }
+            UpdateState::Installing { installer, .. } => {
+                let progress = installer.progress.lock().unwrap();
+                window("Installing Update").show(ctx, |ui| {
+                    ui.set_width(480.0);
+                    ui.strong(if progress.phase.is_empty() {
+                        "Starting…"
+                    } else {
+                        &progress.phase
+                    });
+                    ui.add(
+                        egui::ProgressBar::new(progress.fraction)
+                            .fill(BLUE)
+                            .show_percentage(),
+                    );
+                    if !progress.detail.is_empty() {
+                        muted(ui, &progress.detail);
+                    }
+                    muted(ui, "The launcher will restart when the update is complete.");
+                });
+            }
+            UpdateState::Failed { error, log } => {
+                let mut retry = false;
+                let mut dismiss = false;
+                window("Update Could Not Finish").show(ctx, |ui| {
+                    ui.set_width(480.0);
+                    ui.colored_label(AMBER, error);
+                    ui.horizontal(|ui| {
+                        dismiss = ui.button("Close").clicked();
+                        retry = ui.button("Check again").clicked();
+                        if !log.is_empty() && ui.button("Copy details").clicked() {
+                            ctx.copy_text(log.clone());
+                        }
+                    });
+                });
+                if retry {
+                    self.start_update_check(ctx, true);
+                } else if dismiss {
+                    self.update = UpdateState::Idle;
+                }
+            }
+            UpdateState::RestartFailed { launcher, error } => {
+                let mut restart = false;
+                window("Update Installed").show(ctx, |ui| {
+                    ui.set_width(480.0);
+                    ui.colored_label(AMBER, format!("Could not restart the launcher. {error}"));
+                    restart = ui.button("Restart launcher").clicked();
+                });
+                if restart {
+                    self.restart_launcher(ctx, launcher.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn support(&mut self, ui: &mut egui::Ui) {
         ui.heading("Support");
         card(ui, |ui| {
@@ -699,34 +1049,6 @@ impl Dashboard {
                 self.notify(Ok("Build info copied.".into()));
             }
             ui.horizontal_wrapped(|ui| {
-                let installed = !self.state.launch.settings_only
-                    && setup::is_installed(&self.state.launch.root);
-                if ui
-                    .add_enabled(
-                        installed && self.update_check.is_none(),
-                        egui::Button::new("Check GitHub for updates"),
-                    )
-                    .clicked()
-                {
-                    let root = self.state.launch.root.clone();
-                    let ctx = ui.ctx().clone();
-                    let (send, receive) = mpsc::channel();
-                    self.update_result = None;
-                    self.update_check = Some(receive);
-                    std::thread::spawn(move || {
-                        let result = Manifest::load(&root.join("installer/infamous.toml"))
-                            .map_err(|e| e.to_string())
-                            .and_then(|m| {
-                                setup::check_update(
-                                    &root,
-                                    m.update_repo.as_deref(),
-                                    &m.update_branch,
-                                )
-                            });
-                        let _ = send.send(result);
-                        ctx.request_repaint();
-                    });
-                }
                 ui.hyperlink_to(
                     "GitHub releases",
                     "https://github.com/WoofahRayetCode/inFAMOUS-US/releases",
@@ -736,21 +1058,6 @@ impl Dashboard {
                     "https://github.com/WoofahRayetCode/inFAMOUS-US/issues/new",
                 );
             });
-            if self.update_check.is_some() {
-                muted(ui, "Checking for updates...");
-            }
-            match &self.update_result {
-                Some(Ok(info)) if info.available => {
-                    ui.colored_label(AMBER, format!("Update available ({}). Open Setup or run Update inFamous.cmd to install it.", info.version));
-                }
-                Some(Ok(info)) => {
-                    muted(ui, format!("Up to date ({})", info.version));
-                }
-                Some(Err(error)) => {
-                    ui.colored_label(AMBER, error);
-                }
-                None => {}
-            }
         });
         card(ui, |ui| {
             ui.label(RichText::new("Credits").size(19.0).strong());
@@ -767,10 +1074,13 @@ impl eframe::App for Dashboard {
             self.state.set_features(features);
             self.feature_check = None;
         }
-        if let Some(result) = self.update_check.as_ref().and_then(|r| r.try_recv().ok()) {
-            self.update_result = Some(result);
-            self.update_check = None;
+        let close_requested = ctx.input(|i| i.viewport().close_requested());
+        let was_running = self.save_transaction.is_some()
+            || matches!(self.update, UpdateState::Installing { .. });
+        if close_requested && was_running {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
         }
+        self.poll_update(ctx);
         self.poll_save_transaction();
         egui::TopBottomPanel::top("tabs")
             .frame(
@@ -779,7 +1089,7 @@ impl eframe::App for Dashboard {
                     .inner_margin(egui::Margin::symmetric(22.0, 10.0)),
             )
             .show(ctx, |ui| {
-                if self.restore.is_some() {
+                if self.restore.is_some() || self.update.blocks_dashboard() {
                     ui.disable();
                 }
                 ui.horizontal_wrapped(|ui| {
@@ -794,6 +1104,7 @@ impl eframe::App for Dashboard {
                     ] {
                         if ui.selectable_label(self.tab == tab, label).clicked() && self.tab != tab
                         {
+                            self.update.defer_review();
                             self.tab = tab;
                             if tab == Tab::Saves && self.save_transaction.is_none() {
                                 self.refresh_saves();
@@ -803,6 +1114,9 @@ impl eframe::App for Dashboard {
                             }
                         }
                     }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        self.update_button(ui);
+                    });
                 });
             });
         egui::TopBottomPanel::bottom("actions")
@@ -812,7 +1126,7 @@ impl eframe::App for Dashboard {
                     .inner_margin(egui::Margin::symmetric(22.0, 11.0)),
             )
             .show(ctx, |ui| {
-                if self.restore.is_some() {
+                if self.restore.is_some() || self.update.blocks_dashboard() {
                     ui.disable();
                 }
                 if let Some(transaction) = &self.save_transaction {
@@ -823,6 +1137,7 @@ impl eframe::App for Dashboard {
                 } else if let Some((text, error)) = &self.notice {
                     ui.colored_label(if *error { AMBER } else { BLUE }, text);
                 }
+                self.update_status(ui);
                 ui.horizontal(|ui| {
                     muted(ui, self.summary());
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -868,28 +1183,31 @@ impl eframe::App for Dashboard {
                     .inner_margin(egui::Margin::symmetric(22.0, 16.0)),
             )
             .show(ctx, |ui| {
-                ui.add_enabled_ui(self.restore.is_none(), |ui| {
-                    egui::ScrollArea::vertical()
-                        .id_salt(match self.tab {
-                            Tab::Play => "play",
-                            Tab::Settings => "settings",
-                            Tab::Saves => "saves",
-                            Tab::Achievements => "achievements",
-                            Tab::Support => "support",
-                        })
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| match self.tab {
-                            Tab::Play => self.home(ui),
-                            Tab::Settings => {
-                                ui.add_enabled_ui(self.save_transaction.is_none(), |ui| {
-                                    self.settings(ui);
-                                });
-                            }
-                            Tab::Saves => self.saves(ui),
-                            Tab::Achievements => self.achievements(ui),
-                            Tab::Support => self.support(ui),
-                        });
-                });
+                ui.add_enabled_ui(
+                    self.restore.is_none() && !self.update.blocks_dashboard(),
+                    |ui| {
+                        egui::ScrollArea::vertical()
+                            .id_salt(match self.tab {
+                                Tab::Play => "play",
+                                Tab::Settings => "settings",
+                                Tab::Saves => "saves",
+                                Tab::Achievements => "achievements",
+                                Tab::Support => "support",
+                            })
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| match self.tab {
+                                Tab::Play => self.home(ui),
+                                Tab::Settings => {
+                                    ui.add_enabled_ui(self.save_transaction.is_none(), |ui| {
+                                        self.settings(ui);
+                                    });
+                                }
+                                Tab::Saves => self.saves(ui),
+                                Tab::Achievements => self.achievements(ui),
+                                Tab::Support => self.support(ui),
+                            });
+                    },
+                );
             });
         if let Some((name, scope)) = self.restore.clone() {
             egui::Window::new("Restore backup")
@@ -913,7 +1231,12 @@ impl eframe::App for Dashboard {
                     });
                 });
         }
-        if self.save_transaction.is_some() && ctx.input(|i| i.viewport().close_requested()) {
+        self.show_update_window(ctx);
+        if close_requested
+            && !was_running
+            && (self.save_transaction.is_some()
+                || matches!(self.update, UpdateState::Installing { .. }))
+        {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
         }
     }

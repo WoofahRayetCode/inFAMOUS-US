@@ -152,16 +152,44 @@ fn http_err(url: &str, stderr: &[u8]) -> Error {
     ))
 }
 
-fn get_bytes(remote: &Remote, url: &str, accept: Option<&str>) -> Result<Vec<u8>> {
+enum Metadata {
+    Found(Vec<u8>),
+    Missing(Error),
+}
+
+fn get_metadata(remote: &Remote, url: &str, accept: Option<&str>) -> Result<Metadata> {
     let out = curl_cmd(remote, url, accept, false)
+        // Metadata also runs during launcher startup. Leave retries to the next check.
+        .args([
+            "--retry",
+            "0",
+            "--max-time",
+            "15",
+            "--write-out",
+            "%{http_code}",
+        ])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
         .ctx(|| "could not run curl (it is part of Windows 10 and 11)")?;
     if !out.status.success() {
-        return Err(http_err(url, &out.stderr));
+        let err = http_err(url, &out.stderr);
+        return if out.status.code() == Some(22) && out.stdout.ends_with(b"404") {
+            Ok(Metadata::Missing(err))
+        } else {
+            Err(err)
+        };
     }
-    Ok(out.stdout)
+    let mut body = out.stdout;
+    body.truncate(body.len().saturating_sub(3));
+    Ok(Metadata::Found(body))
+}
+
+fn get_bytes(remote: &Remote, url: &str, accept: Option<&str>) -> Result<Vec<u8>> {
+    match get_metadata(remote, url, accept)? {
+        Metadata::Found(body) => Ok(body),
+        Metadata::Missing(err) => Err(err),
+    }
 }
 
 fn get_file(remote: &Remote, url: &str, dest: &Path, trusted_redirect: bool) -> Result<()> {
@@ -435,6 +463,11 @@ pub struct Plan {
     pub previous_commit: Option<String>,
 }
 
+pub struct Availability {
+    pub available: bool,
+    pub pending_rebuild: bool,
+}
+
 impl Plan {
     pub fn is_empty(&self) -> bool {
         self.fetch.is_empty() && self.delete.is_empty()
@@ -442,6 +475,20 @@ impl Plan {
     pub fn download_bytes(&self) -> u64 {
         self.fetch.iter().map(|e| e.size).sum()
     }
+
+    pub fn availability(&self, root: &Path) -> Availability {
+        let pending_rebuild = pending_marker(root).is_file();
+        Availability {
+            available: !self.is_empty()
+                || pending_rebuild
+                || crate::upscalers::needs_provisioning(root),
+            pending_rebuild,
+        }
+    }
+}
+
+pub fn pending_marker(root: &Path) -> PathBuf {
+    root.join(".installer").join("update.pending")
 }
 
 /// `.installer/update.state`: the commit this folder was last updated to and the files it got.
@@ -567,6 +614,10 @@ fn protected(m: &Manifest, p: &str) -> bool {
         || m.is_generated(p)
 }
 
+pub fn is_commit_sha(commit: &str) -> bool {
+    commit.len() == 40 && commit.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
 pub fn plan(root: &Path, m: &Manifest, r: &Remote) -> Result<Plan> {
     let api = format!("{}/repos/{}", api_base(), r.repo);
     let commit = get_bytes(
@@ -575,7 +626,7 @@ pub fn plan(root: &Path, m: &Manifest, r: &Remote) -> Result<Plan> {
         Some("application/vnd.github.sha"),
     )?;
     let commit = String::from_utf8_lossy(&commit).trim().to_string();
-    if commit.len() != 40 || !commit.bytes().all(|b| b.is_ascii_hexdigit()) {
+    if !is_commit_sha(&commit) {
         bail!(
             "GitHub did not return a commit for {} branch {} (got '{}')",
             r.repo,
@@ -696,6 +747,157 @@ pub fn plan(root: &Path, m: &Manifest, r: &Remote) -> Result<Plan> {
         all: remote.into_keys().collect(),
         previous_commit: st.commit,
     })
+}
+
+/// The exact version and commit subjects the launcher presents before applying an update.
+#[derive(Clone, Debug)]
+pub struct Preview {
+    pub commit: String,
+    pub available: bool,
+    pub changes: Vec<String>,
+    pub notes_status: Option<String>,
+}
+
+pub fn preview(root: &Path) -> Result<Preview> {
+    let manifest = Manifest::load(&root.join("installer/infamous.toml"))?;
+    let remote = Remote::new(&manifest, None, None)?;
+    let plan = plan(root, &manifest, &remote)?;
+    let availability = plan.availability(root);
+    let (changes, notes_status) = if !availability.available {
+        (Vec::new(), None)
+    } else if plan.is_empty() {
+        let status = if availability.pending_rebuild {
+            "The files are current. The installer will finish building the previous update."
+        } else {
+            "The files are current. The installer will prepare DLSS and FSR support."
+        };
+        (Vec::new(), Some(status.into()))
+    } else {
+        match change_notes(&remote, &plan) {
+            Ok(notes) => notes,
+            Err(_) => (
+                Vec::new(),
+                Some(
+                    "GitHub change notes are unavailable. You can still install this update."
+                        .into(),
+                ),
+            ),
+        }
+    };
+    Ok(Preview {
+        commit: plan.commit,
+        available: availability.available,
+        changes,
+        notes_status,
+    })
+}
+
+fn change_notes(r: &Remote, plan: &Plan) -> Result<(Vec<String>, Option<String>)> {
+    let api = format!("{}/repos/{}", api_base(), r.repo);
+    let target = &plan.commit;
+    let base = plan.previous_commit.as_deref().filter(|c| is_commit_sha(c));
+    let accept = Some("application/vnd.github+json");
+    if let Some(base) = base {
+        if base.eq_ignore_ascii_case(target) {
+            return Ok((
+                Vec::new(),
+                Some("No new commits. The installer will repair files or finish preparing this version.".into()),
+            ));
+        }
+        let url = format!("{api}/compare/{base}...{target}");
+        if let Metadata::Found(comparison) = get_metadata(r, &url, accept)? {
+            if let Some(notes) = incoming_notes(&parse_json(&comparison)?, base)? {
+                return Ok(notes);
+            }
+        }
+    }
+
+    // Setup records a file list but does not always record the exact commit it packaged.
+    let url = format!("{api}/commits?sha={target}&per_page=20");
+    let Json::Arr(commits) = parse_json(&get_bytes(r, &url, accept)?)? else {
+        bail!("unexpected answer from GitHub (no recent commits)");
+    };
+    let (changes, _) = commit_subjects(commits.iter());
+    let baseline = if base.is_some() {
+        "GitHub could not match the installed commit to the offered version's history."
+    } else {
+        "The installed commit was not recorded."
+    };
+    let description = if changes.is_empty() {
+        "GitHub did not list any recent change notes for this version."
+    } else {
+        "Showing recent commits for the offered version."
+    };
+    Ok((changes, Some(format!("{baseline} {description}"))))
+}
+
+fn incoming_notes(comparison: &Json, base: &str) -> Result<Option<(Vec<String>, Option<String>)>> {
+    match comparison.get("status").and_then(Json::str) {
+        Some("ahead") => (),
+        Some("behind" | "diverged") => return Ok(None),
+        _ => bail!("unexpected answer from GitHub (no comparison status)"),
+    }
+    let ancestor = comparison
+        .get("merge_base_commit")
+        .and_then(|commit| commit.get("sha"))
+        .and_then(Json::str);
+    if !ancestor.is_some_and(|sha| sha.eq_ignore_ascii_case(base)) {
+        bail!("unexpected answer from GitHub (the comparison base did not match)");
+    }
+    let Some(Json::Arr(commits)) = comparison.get("commits") else {
+        bail!("unexpected answer from GitHub (no comparison commits)");
+    };
+    // The unpaginated comparison returns up to 250 of the most recent commits, oldest first.
+    let (changes, partial) = commit_subjects(commits.iter().rev());
+    let complete = matches!(
+        comparison.get("total_commits"),
+        Some(Json::Num(total)) if *total == commits.len() as f64
+    );
+    let status = if partial || !complete {
+        Some("Showing a subset of the incoming commits.".into())
+    } else if changes.is_empty() {
+        Some(
+            "The incoming commits did not list any changes beyond updater binary refreshes.".into(),
+        )
+    } else {
+        None
+    };
+    Ok(Some((changes, status)))
+}
+
+fn commit_subjects<'a>(commits: impl Iterator<Item = &'a Json>) -> (Vec<String>, bool) {
+    let mut subjects = Vec::new();
+    let mut partial = false;
+    for commit in commits {
+        let subject = commit
+            .get("commit")
+            .and_then(|data| data.get("message"))
+            .and_then(Json::str)
+            .and_then(|message| message.lines().next())
+            .map(str::trim);
+        let Some(subject) = subject.filter(|s| !s.is_empty()) else {
+            partial = true;
+            continue;
+        };
+        if matches!(
+            subject,
+            "Refresh updater binaries from Setup app build"
+                | "Keep updater binaries current after successful Windows builds"
+        ) || subject.starts_with("Rebuilt installer and launcher binaries")
+        {
+            continue;
+        }
+        if subjects.len() == 8 {
+            return (subjects, true);
+        }
+        let mut chars = subject.chars();
+        let mut display: String = chars.by_ref().take(160).collect();
+        if chars.next().is_some() {
+            display.push('\u{2026}');
+        }
+        subjects.push(display);
+    }
+    (subjects, partial)
 }
 
 // ---------------------------------------------------------------------------------------------

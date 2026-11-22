@@ -176,8 +176,11 @@ real edits instead of every line. Run `make-patches` on Windows, because that is
 ### Launcher save management
 
 The standard build opens a dashboard with **Play**, **Display & Controls**, **Saves**,
-and **Support**. The Support tab opens game logs and checks for updates using the
-installed manifest. Launching with `--play` still goes straight into the game.
+**Achievements**, and **Support**. The launcher checks the branch in the installed manifest
+in the background and offers a manual check through **Update**. The update preview shows
+incoming commit summaries when the installed revision is known. If the branch moves before
+installation starts, the launcher asks you to check again so you can review the newer changes.
+**Support** opens game logs. Launching with `--play` goes straight into the game.
 
 The launcher resolves `SAVEDATA_ROOT` with the same launch environment as the game;
 without an override it uses `<game working folder>/gamedata/dev_hdd0/home/00000001/savedata`.

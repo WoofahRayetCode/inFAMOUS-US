@@ -698,31 +698,9 @@ pub struct Installer {
 
 impl Installer {
     pub fn start(opts: InstallOpts, repaint: Arc<dyn Fn() + Send + Sync>) -> Installer {
-        let progress = Arc::new(Mutex::new(Progress {
-            started: Some(std::time::Instant::now()),
-            ..Default::default()
-        }));
-        let cancel = Arc::new(AtomicBool::new(false));
-        let child = Arc::new(Mutex::new(None));
-        let (p, c, ch) = (progress.clone(), cancel.clone(), child.clone());
-        std::thread::spawn(move || {
-            let r = install(&opts, &p, &c, &ch, &*repaint);
-            let mut g = p.lock().unwrap();
-            if let Err(e) = &r {
-                g.push(format!("ERROR: {e}"));
-            } else {
-                g.fraction = 1.0;
-                g.phase = "Finished".into();
-            }
-            g.done = Some(r);
-            drop(g);
-            repaint();
-        });
-        Installer {
-            progress,
-            cancel,
-            child,
-        }
+        Self::spawn(repaint, move |p, c, ch, repaint| {
+            install(&opts, p, c, ch, repaint)
+        })
     }
 
     /// Update an existing installation from GitHub (`infamous-installer update`).
@@ -735,6 +713,77 @@ impl Installer {
         update_branch: String,
         repaint: Arc<dyn Fn() + Send + Sync>,
     ) -> Installer {
+        Self::spawn(repaint, move |p, c, ch, repaint| {
+            run_update(
+                &location,
+                &game_title,
+                start_menu,
+                &source,
+                update_repo.as_deref(),
+                &update_branch,
+                p,
+                c,
+                ch,
+                repaint,
+            )
+        })
+    }
+
+    /// Apply the launcher-reviewed update using the installed command-line installer.
+    pub fn start_launcher_update(
+        location: PathBuf,
+        expected_commit: String,
+        repaint: Arc<dyn Fn() + Send + Sync>,
+    ) -> Installer {
+        Self::spawn(repaint, move |p, cancel, child, repaint| {
+            let _game_lock = crate::save_manager::GameLock::acquire().map_err(|_| {
+                "Close the game and let any other launcher operation finish before updating."
+                    .to_string()
+            })?;
+            let ext = if cfg!(windows) { ".exe" } else { "" };
+            let cli = location
+                .join("installer")
+                .join(format!("infamous-installer{ext}"));
+            let mut cmd = Command::new(cli);
+            cmd.arg("update")
+                .arg("--root")
+                .arg(&location)
+                .arg("--expect-commit")
+                .arg(expected_commit);
+            let stopped = || cancel.load(Ordering::SeqCst);
+            if stopped() {
+                return Err("cancelled".into());
+            }
+            let set = |fraction, phase: &str, detail: &str| {
+                let mut g = p.lock().unwrap();
+                g.fraction = fraction;
+                if !phase.is_empty() {
+                    g.phase = phase.to_string();
+                }
+                g.detail = detail.to_string();
+                drop(g);
+                repaint();
+            };
+            let log = |line| {
+                p.lock().unwrap().push(line);
+                repaint();
+            };
+            set(0.0, "Starting the update", "");
+            run_cli(cmd, &location, p, child, &stopped, &set, &log)
+        })
+    }
+
+    fn spawn(
+        repaint: Arc<dyn Fn() + Send + Sync>,
+        work: impl FnOnce(
+                &Arc<Mutex<Progress>>,
+                &AtomicBool,
+                &Arc<Mutex<Option<u32>>>,
+                &(dyn Fn() + Send + Sync),
+            ) -> Result<(), String>
+            + Send
+            + 'static,
+    ) -> Installer {
         let progress = Arc::new(Mutex::new(Progress {
             started: Some(std::time::Instant::now()),
             ..Default::default()
@@ -743,18 +792,7 @@ impl Installer {
         let child = Arc::new(Mutex::new(None));
         let (p, c, ch) = (progress.clone(), cancel.clone(), child.clone());
         std::thread::spawn(move || {
-            let r = run_update(
-                &location,
-                &game_title,
-                start_menu,
-                &source,
-                update_repo.as_deref(),
-                &update_branch,
-                &p,
-                &c,
-                &ch,
-                &*repaint,
-            );
+            let r = work(&p, &c, &ch, &*repaint);
             let mut g = p.lock().unwrap();
             if let Err(e) = &r {
                 g.push(format!("ERROR: {e}"));
