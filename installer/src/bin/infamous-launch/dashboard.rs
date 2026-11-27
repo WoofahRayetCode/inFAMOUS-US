@@ -1,7 +1,7 @@
 use super::*;
 use eframe::egui::{self, Color32, RichText};
 use infamous_installer::update::Availability;
-use infamous_installer::{game, lock, setup, trophy, update};
+use infamous_installer::{game, lock, manifest::Manifest, setup, trophy, update, update_channel};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     mpsc, Arc,
@@ -49,6 +49,9 @@ struct Dashboard {
     trophy_catalog: Option<Result<trophy::Catalog, String>>,
     trophy_progress: Result<BTreeMap<u32, u64>, String>,
     update: UpdateState,
+    release_channels: bool,
+    update_channel: update::Channel,
+    installed_channel: Option<update::Channel>,
 }
 
 use infamous_installer::save_manager;
@@ -213,6 +216,15 @@ impl Dashboard {
         let updates_enabled = !MOVEMENT_TEST
             && !state.launch.settings_only
             && setup::is_installed(&state.launch.root);
+        let release_channels = updates_enabled
+            && Manifest::load(&state.launch.root.join("installer/infamous.toml"))
+                .is_ok_and(|manifest| manifest.update_releases);
+        let update_channel = if release_channels {
+            update_channel::preferred(&state.launch.root)
+        } else {
+            update::Channel::Stable
+        };
+        let installed_channel = update_channel::installed(&state.launch.root);
         let mut dashboard = Self {
             state,
             tab,
@@ -235,6 +247,9 @@ impl Dashboard {
             } else {
                 UpdateState::Disabled
             },
+            release_channels,
+            update_channel,
+            installed_channel,
         };
         if updates_enabled {
             dashboard.start_update_check(ctx, false);
@@ -773,10 +788,13 @@ impl Dashboard {
             return;
         }
         let root = self.state.launch.root.clone();
+        let channel = self.update_channel;
         let ctx = ctx.clone();
         let (send, completion) = mpsc::channel();
         let worker = std::thread::Builder::new().spawn(move || {
-            let _ = send.send(update::preview(&root).map_err(|error| error.to_string()));
+            let _ = send.send(
+                update::preview_for_channel(&root, channel).map_err(|error| error.to_string()),
+            );
             ctx.request_repaint();
         });
         self.update = match worker {
@@ -953,7 +971,15 @@ impl Dashboard {
                 };
                 window(title).show(ctx, |ui| {
                     ui.set_width(480.0);
-                    muted(ui, format!("Version {}", short_commit(&preview.commit)));
+                    let version = preview
+                        .release_tag
+                        .clone()
+                        .unwrap_or_else(|| short_commit(&preview.commit));
+                    if self.release_channels {
+                        muted(ui, format!("{} · {version}", self.update_channel.label()));
+                    } else {
+                        muted(ui, format!("Version {version}"));
+                    }
                     if let Some(status) = &preview.notes_status {
                         muted(ui, status);
                     }
@@ -995,12 +1021,21 @@ impl Dashboard {
                         };
                     }
                 } else if install {
-                    match std::env::current_exe() {
+                    let root = &self.state.launch.root;
+                    let launcher = if preview.release_tag.is_some() {
+                        Manifest::load(&root.join("installer/infamous.toml"))
+                            .map(|manifest| root.join(update::launcher_name(&manifest.game_title)))
+                            .map_err(|error| error.to_string())
+                    } else {
+                        std::env::current_exe().map_err(|error| error.to_string())
+                    };
+                    match launcher {
                         Ok(launcher) => {
                             let repaint = ctx.clone();
                             let installer = setup::Installer::start_launcher_update(
-                                self.state.launch.root.clone(),
+                                root.clone(),
                                 preview.commit.clone(),
+                                self.release_channels.then_some(self.update_channel),
                                 Arc::new(move || repaint.request_repaint()),
                             );
                             self.update = UpdateState::Installing {
@@ -1008,9 +1043,9 @@ impl Dashboard {
                                 launcher,
                             };
                         }
-                        Err(error) => {
-                            self.notify(Err(format!("Could not locate the launcher: {error}")))
-                        }
+                        Err(error) => self.notify(Err(format!(
+                            "Could not locate the installed launcher: {error}"
+                        ))),
                     }
                 } else if save {
                     let result = self.state.save().map(|()| "Settings saved.".into());
@@ -1117,6 +1152,39 @@ impl Dashboard {
             };
             ui.label(RichText::new(title).size(19.0).strong());
             ui.label(self.region_label());
+            if let Some(channel) = self.installed_channel {
+                ui.label(format!("Installed build: {}", channel.label()));
+            }
+            if self.release_channels {
+                let mut selected = self.update_channel;
+                ui.horizontal(|ui| {
+                    ui.label("Update channel");
+                    egui::ComboBox::from_id_salt("update_channel")
+                        .selected_text(selected.label())
+                        .show_ui(ui, |ui| {
+                            for channel in [update::Channel::Stable, update::Channel::BleedingEdge]
+                            {
+                                ui.selectable_value(&mut selected, channel, channel.label());
+                            }
+                        });
+                });
+                muted(
+                    ui,
+                    "Bleeding Edge receives successful builds from the default branch.",
+                );
+                if selected != self.update_channel {
+                    match update_channel::set_preferred(&self.state.launch.root, selected) {
+                        Ok(()) => {
+                            self.update_channel = selected;
+                            self.notice = None;
+                            self.start_update_check(ui.ctx(), true);
+                        }
+                        Err(error) => {
+                            self.notify(Err(format!("Could not save the update channel: {error}")));
+                        }
+                    }
+                }
+            }
             if ui.button("Copy build info").clicked() {
                 let root = &self.state.launch.root;
                 let install = lock::State::load(&root.join(".installer/state"));
@@ -1134,8 +1202,8 @@ impl Dashboard {
                     .collect::<Vec<_>>()
                     .join("\n");
                 ui.ctx().copy_text(format!(
-                    "{DASHBOARD_TITLE}\nRegion: {}\nUpdater commit: {}\nGame executable (bytes and modified Unix time): {}\nEBOOT SHA-256: {}\n{settings}",
-                    self.region_label(), commit.as_deref().unwrap_or("Unavailable"), build,
+                    "{DASHBOARD_TITLE}\nRegion: {}\nInstalled build: {}\nUpdater commit: {}\nGame executable (bytes and modified Unix time): {}\nEBOOT SHA-256: {}\n{settings}",
+                    self.region_label(), self.installed_channel.map_or("Unmarked", update::Channel::label), commit.as_deref().unwrap_or("Unavailable"), build,
                     install.eboot.as_deref().unwrap_or("Unavailable")));
                 self.notify(Ok("Build info copied.".into()));
             }
@@ -1187,6 +1255,11 @@ impl eframe::App for Dashboard {
                 }
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(DASHBOARD_TITLE).strong().color(BLUE));
+                    if !MOVEMENT_TEST
+                        && self.installed_channel == Some(update::Channel::BleedingEdge)
+                    {
+                        ui.label(RichText::new("Bleeding Edge").strong().color(AMBER));
+                    }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let guide = egui::Button::new(
                             RichText::new("How to Use").strong().color(BACKGROUND),
@@ -1390,20 +1463,19 @@ mod tests {
         fs::create_dir_all(root.join("installer")).unwrap();
         fs::create_dir(root.join(".installer")).unwrap();
         fs::write(root.join(".installer/state"), "").unwrap();
-        fs::write(
-            root.join("installer").join(format!(
-                "infamous-installer{}",
-                std::env::consts::EXE_SUFFIX
-            )),
-            "",
-        )
-        .unwrap();
+        fs::write(update::installed_cli(&root), "").unwrap();
         fs::write(
             root.join("installer/infamous.toml"),
             include_bytes!("../../../infamous.toml"),
         )
         .unwrap();
         assert!(setup::is_installed(&root));
+        assert!(
+            Manifest::load(&root.join("installer/infamous.toml"))
+                .unwrap()
+                .update_releases
+        );
+        update_channel::set_preferred(&root, update::Channel::BleedingEdge).unwrap();
 
         let mut launch = Launch::from_args(&[]).unwrap();
         launch.root = root.clone();
@@ -1414,9 +1486,14 @@ mod tests {
         let ctx = egui::Context::default();
         let mut dashboard = Dashboard::new(state, Arc::new(AtomicBool::new(false)), &ctx);
         assert!(matches!(dashboard.update, UpdateState::Disabled));
+        assert!(!dashboard.release_channels);
         assert!(dashboard.notice.is_none());
         dashboard.start_update_check(&ctx, true);
         assert!(matches!(dashboard.update, UpdateState::Disabled));
+        assert_eq!(
+            update_channel::preferred(&root),
+            update::Channel::BleedingEdge
+        );
         fs::remove_dir_all(root).unwrap();
     }
 }

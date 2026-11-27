@@ -709,8 +709,7 @@ impl Installer {
         game_title: String,
         start_menu: bool,
         source: Source,
-        update_repo: Option<String>,
-        update_branch: String,
+        manifest: Manifest,
         repaint: Arc<dyn Fn() + Send + Sync>,
     ) -> Installer {
         Self::spawn(repaint, move |p, c, ch, repaint| {
@@ -719,8 +718,7 @@ impl Installer {
                 &game_title,
                 start_menu,
                 &source,
-                update_repo.as_deref(),
-                &update_branch,
+                &manifest,
                 p,
                 c,
                 ch,
@@ -733,6 +731,7 @@ impl Installer {
     pub fn start_launcher_update(
         location: PathBuf,
         expected_commit: String,
+        channel: Option<crate::update::Channel>,
         repaint: Arc<dyn Fn() + Send + Sync>,
     ) -> Installer {
         Self::spawn(repaint, move |p, cancel, child, repaint| {
@@ -750,6 +749,9 @@ impl Installer {
                 .arg(&location)
                 .arg("--expect-commit")
                 .arg(expected_commit);
+            if let Some(channel) = channel {
+                cmd.arg("--channel").arg(channel.as_str());
+            }
             let stopped = || cancel.load(Ordering::SeqCst);
             if stopped() {
                 return Err("cancelled".into());
@@ -821,11 +823,20 @@ impl Installer {
 
 /// A folder holding a finished installation (the setup's files plus the installer's state).
 pub fn is_installed(dir: &Path) -> bool {
-    let ext = if cfg!(windows) { ".exe" } else { "" };
-    dir.join("installer")
-        .join(format!("infamous-installer{ext}"))
-        .is_file()
-        && dir.join(".installer").join("state").is_file()
+    crate::update::installed_cli(dir).is_file() && dir.join(".installer").join("state").is_file()
+}
+
+/// Setup can restore a missing updater directly from a release.
+pub fn can_update(dir: &Path, source: &Manifest) -> bool {
+    is_installed(dir)
+        || (cfg!(windows)
+            && source.update_releases
+            && Manifest::load(&dir.join("installer/infamous.toml")).is_ok()
+            && lock::State::load(&dir.join(".installer/state"))
+                .eboot
+                .is_some_and(|hash| {
+                    hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit())
+                }))
 }
 
 #[derive(Clone, Debug)]
@@ -836,23 +847,22 @@ pub struct UpdateInfo {
     pub version: String,
 }
 
-/// Check the installed files against the update source selected by this Setup.
-pub fn check_update(
-    dir: &Path,
-    update_repo: Option<&str>,
-    update_branch: &str,
-) -> Result<UpdateInfo, String> {
-    let manifest =
-        Manifest::load(&dir.join("installer/infamous.toml")).map_err(|e| e.to_string())?;
-    let remote = crate::update::Remote::new(&manifest, update_repo, Some(update_branch))
-        .map_err(|e| e.to_string())?;
-    let plan = crate::update::plan(dir, &manifest, &remote).map_err(|e| e.to_string())?;
-    Ok(UpdateInfo {
-        availability: plan.availability(dir),
-        files: (plan.fetch.len() + plan.delete.len()) as u64,
-        bytes: plan.download_bytes(),
-        version: plan.commit.chars().take(10).collect(),
-    })
+/// Use this Setup's update source so older installations can be checked before replacing their CLI.
+pub fn check_update(dir: &Path, manifest: &Manifest) -> Result<UpdateInfo, String> {
+    let channel = manifest
+        .update_releases
+        .then(|| crate::update_channel::preferred(dir));
+    let result = (|| -> util::Result<_> {
+        let remote = crate::update::Remote::new(manifest, None, None, channel)?;
+        let plan = crate::update::plan(dir, manifest, &remote)?;
+        Ok(UpdateInfo {
+            availability: plan.availability(dir),
+            files: (plan.fetch.len() + plan.delete.len()) as u64,
+            bytes: plan.download_bytes(),
+            version: plan.commit.chars().take(10).collect(),
+        })
+    })();
+    result.map_err(|error| error.to_string())
 }
 
 fn run_update(
@@ -860,8 +870,7 @@ fn run_update(
     game_title: &str,
     start_menu: bool,
     source: &Source,
-    update_repo: Option<&str>,
-    update_branch: &str,
+    manifest: &Manifest,
     p: &Arc<Mutex<Progress>>,
     cancel: &AtomicBool,
     child: &Arc<Mutex<Option<u32>>>,
@@ -882,6 +891,40 @@ fn run_update(
         repaint();
     };
     let stopped = || cancel.load(Ordering::SeqCst);
+    if cfg!(windows) && manifest.update_releases {
+        let _game_lock = crate::save_manager::GameLock::acquire()
+            .map_err(|_| "Close the game before updating.".to_string())?;
+        let _update_lock = crate::update::install_lock(dir).map_err(|e| e.to_string())?;
+        let channel = crate::update_channel::preferred(dir);
+        let remote = crate::update::Remote::new(manifest, None, None, Some(channel))
+            .map_err(|e| e.to_string())?;
+        set(0.02, "Checking GitHub for a new version", "");
+        let plan = crate::update::plan(dir, manifest, &remote).map_err(|e| e.to_string())?;
+        if let Some(tag) = &plan.release_tag {
+            log(format!("Release {tag}"));
+        }
+        let availability = plan.availability(dir);
+        if let Some(action) = availability.action_label() {
+            set(0.05, action, "");
+            crate::update::apply(
+                dir,
+                &remote,
+                &plan,
+                &mut |line| {
+                    set(0.05, "", &line);
+                    log(line);
+                },
+                &stopped,
+            )
+            .map_err(|e| e.to_string())?;
+            let cmd = crate::update::finish_command(dir, &plan.commit);
+            run_cli(cmd, dir, p, child, &stopped, &set, &log)?;
+        }
+        if start_menu {
+            add_update_shortcut(dir, game_title, &log);
+        }
+        return Ok(());
+    }
     remove_internal_documents(dir, &log);
     set(0.005, "Repairing the launcher and updater", "");
     let placed = place_files(source, dir, &mut |done, total| {
@@ -905,10 +948,15 @@ fn run_update(
     cmd.arg("update").arg("--root").arg(dir);
     // See check_update: this deliberately migrates fork-configured and stale installations back
     // to the repository selected by the Setup the player is currently running.
-    if let Some(repo) = update_repo {
+    if let Some(repo) = &manifest.update_repo {
         cmd.arg("--repo").arg(repo);
     }
-    cmd.arg("--branch").arg(update_branch);
+    if manifest.update_releases {
+        cmd.arg("--channel")
+            .arg(crate::update_channel::preferred(dir).as_str());
+    } else {
+        cmd.arg("--branch").arg(&manifest.update_branch);
+    }
     run_cli(cmd, dir, p, child, &stopped, &set, &log)?;
     if start_menu {
         add_update_shortcut(dir, game_title, &log);

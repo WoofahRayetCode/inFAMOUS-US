@@ -1,7 +1,6 @@
 name: Setup app
 
 on:
-  # Every push can supersede a build before it publishes to the default branch.
   push:
     branches: ['**']
   pull_request:
@@ -12,6 +11,11 @@ on:
       - "ps3recomp/**"
       - "sdl3/**"
   workflow_dispatch:
+    inputs:
+      publish_stable:
+        description: Publish this default-branch build as the stable release
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -20,11 +24,15 @@ jobs:
   build:
     name: Build (Windows)
     runs-on: windows-latest
+    outputs:
+      channel: ${{ steps.package.outputs.channel }}
     defaults:
       run:
         working-directory: installer
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
@@ -59,16 +67,27 @@ jobs:
         run: cargo build --release --locked
 
       - name: Package standalone Setup
+        id: package
         working-directory: .
         shell: pwsh
+        env:
+          BUILD_CHANNEL: >-
+            ${{ github.event_name == 'workflow_dispatch' && inputs.publish_stable &&
+                github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+                'stable' || 'bleeding-edge' }}
         run: |
+          [IO.File]::WriteAllText((Join-Path $PWD 'installer/build-channel'), "$env:BUILD_CHANNEL`n", [Text.Encoding]::ASCII)
           installer/target/release/infamous-installer.exe package --root . --out "dist/inFamous Setup.exe"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "channel=$env:BUILD_CHANNEL" >> $env:GITHUB_OUTPUT
 
       - name: Test packaged Python without system Python on PATH
         shell: pwsh
+        env:
+          INFAMOUS_TEST_BUILD_CHANNEL: ${{ steps.package.outputs.channel }}
         run: |
           $env:INFAMOUS_TEST_SETUP = (Resolve-Path '../dist/inFamous Setup.exe').Path
+          $env:INFAMOUS_TEST_RELEASE_BIN = (Resolve-Path 'target/release').Path
           cargo test --release --locked --test packaged_python -- --ignored
 
       - uses: actions/upload-artifact@v4
@@ -76,6 +95,7 @@ jobs:
           name: inFamous-Setup
           path: dist/inFamous Setup.exe
           if-no-files-found: error
+          overwrite: true
 
       - uses: actions/upload-artifact@v4
         with:
@@ -85,9 +105,10 @@ jobs:
             installer/target/release/infamous-setup.exe
             installer/target/release/infamous-launch.exe
           if-no-files-found: error
+          overwrite: true
 
-  publish-updater:
-    name: Publish updater binaries
+  publish:
+    name: Publish Setup and updater release
     needs: build
     if: >-
       (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
@@ -106,41 +127,53 @@ jobs:
           name: infamous-installer
           path: ${{ runner.temp }}/updater-binaries
 
-      - name: Publish tested installer and launcher
+      - uses: actions/download-artifact@v4
+        with:
+          name: inFamous-Setup
+          path: ${{ runner.temp }}/setup
+
+      - name: Publish tested Setup, installer, and launcher
         shell: bash
         env:
-          TARGET_REF: ${{ github.ref }}
+          BUILD_CHANNEL: ${{ needs.build.outputs.channel }}
+          GH_TOKEN: ${{ github.token }}
         run: |
+          case "$BUILD_CHANNEL" in
+            stable)
+              tag=$(date -u +v%Y%m%d.%H%M%SZ)
+              flags=(--latest)
+              ;;
+            bleeding-edge)
+              tag="bleeding-edge-$GITHUB_RUN_NUMBER-$GITHUB_RUN_ATTEMPT"
+              flags=(--prerelease --latest=false)
+              ;;
+            *)
+              echo "Unexpected build channel: $BUILD_CHANNEL" >&2
+              exit 1
+              ;;
+          esac
+
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           artifact="$RUNNER_TEMP/updater-binaries"
+          setup="$RUNNER_TEMP/setup/inFamous-Setup.exe"
           test -s "$artifact/infamous-installer.exe"
           test -s "$artifact/infamous-launch.exe"
+          test -s "$RUNNER_TEMP/setup/inFamous Setup.exe"
+          mv "$RUNNER_TEMP/setup/inFamous Setup.exe" "$setup"
+          mkdir -p installer/bin
           cp "$artifact/infamous-installer.exe" "$artifact/infamous-launch.exe" installer/bin/
-          git add -- installer/bin/infamous-installer.exe installer/bin/infamous-launch.exe
-          if git diff --cached --quiet; then
-            echo 'Updater binaries are already current.'
-            exit 0
-          fi
+          printf '%s\n' "$BUILD_CHANNEL" > installer/build-channel
+          git add -- installer/build-channel installer/bin/infamous-installer.exe installer/bin/infamous-launch.exe
 
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit -m 'Refresh updater binaries from Setup app build'
+          git commit --allow-empty -m "Distribute $BUILD_CHANNEL build $GITHUB_SHA"
+          for binary in infamous-installer.exe infamous-launch.exe; do
+            test "$(git rev-parse "HEAD:installer/bin/$binary")" = "$(git hash-object --no-filters "$artifact/$binary")"
+          done
 
-          # Compare with the current tip, then use a normal push to guard against a race.
-          branch_tip() {
-            git ls-remote --exit-code origin "$TARGET_REF" | cut -f1
-          }
-          tip=$(branch_tip)
-          if [[ "$tip" != "$GITHUB_SHA" ]]; then
-            echo 'The default branch moved after this build. Skipping publication.'
-            exit 0
-          fi
-          if git push origin "HEAD:$TARGET_REF"; then
-            exit 0
-          fi
-
-          tip=$(branch_tip)
-          if [[ "$tip" != "$GITHUB_SHA" ]]; then
-            echo 'Another push moved the default branch. Skipping publication.'
-            exit 0
-          fi
-          exit 1
+          # Push only a new tag. The distribution commit stays off the default branch.
+          git push origin "HEAD:refs/tags/$tag"
+          gh release create "$tag" "$setup" --verify-tag "${flags[@]}" \
+            --title "$tag" \
+            --notes "Built from $GITHUB_SHA by [Setup app run $GITHUB_RUN_ID]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)."

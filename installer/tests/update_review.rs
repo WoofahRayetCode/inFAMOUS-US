@@ -44,7 +44,10 @@ const API_REPO: &str = "/repos/WoofahRayetCode/inFAMOUS-US";
 const COMMIT: &str = "2222222222222222222222222222222222222222";
 const TREE_PATH: &str = "/git/trees/2222222222222222222222222222222222222222?recursive=1";
 
-fn serve(responses: Vec<(&'static str, String)>) -> (String, std::thread::JoinHandle<()>) {
+fn serve(
+    repo: &'static str,
+    responses: Vec<(&'static str, String)>,
+) -> (String, std::thread::JoinHandle<()>) {
     let server = TcpListener::bind("127.0.0.1:0").unwrap();
     server.set_nonblocking(true).unwrap();
     let api = format!("http://{}", server.local_addr().unwrap());
@@ -70,7 +73,7 @@ fn serve(responses: Vec<(&'static str, String)>) -> (String, std::thread::JoinHa
             let mut request = BufReader::new(&stream);
             let mut line = String::new();
             request.read_line(&mut line).unwrap();
-            assert_eq!(line.trim_end(), format!("GET {API_REPO}{path} HTTP/1.1"));
+            assert_eq!(line.trim_end(), format!("GET {repo}{path} HTTP/1.1"));
             line.clear();
             while request.read_line(&mut line).unwrap() != 0 && line != "\r\n" {
                 line.clear();
@@ -97,10 +100,10 @@ fn check_describes_same_commit_file_repair_and_preserves_the_legacy_status_line(
         format!("commit {COMMIT}\n"),
     )
     .unwrap();
-    let (api, server) = serve(vec![
-        ("/commits/main", COMMIT.into()),
-        (TREE_PATH, TREE.into()),
-    ]);
+    let (api, server) = serve(
+        API_REPO,
+        vec![("/commits/main", COMMIT.into()), (TREE_PATH, TREE.into())],
+    );
     let output = root
         .update(&api)
         .args(["--branch", "main", "--check"])
@@ -122,10 +125,10 @@ fn check_describes_same_commit_file_repair_and_preserves_the_legacy_status_line(
 #[test]
 fn update_rejects_a_branch_tip_that_changed_after_review() {
     let root = Install::new("review");
-    let (api, serve) = serve(vec![
-        ("/commits/main", COMMIT.into()),
-        (TREE_PATH, TREE.into()),
-    ]);
+    let (api, server) = serve(
+        API_REPO,
+        vec![("/commits/main", COMMIT.into()), (TREE_PATH, TREE.into())],
+    );
     let output = root
         .update(&api)
         .args([
@@ -142,5 +145,97 @@ fn update_rejects_a_branch_tip_that_changed_after_review() {
     assert!(!output.status.success());
     assert!(error.contains("changed since review"), "{error}");
     assert!(!root.0.join(".installer").exists());
-    serve.join().unwrap();
+    server.join().unwrap();
+}
+
+#[test]
+fn repo_override_keeps_the_configured_branch_without_a_channel_override() {
+    let root = Install::new("repo-override");
+    let (api, server) = serve(
+        "/repos/owner/fork",
+        vec![("/commits/main", COMMIT.into()), (TREE_PATH, TREE.into())],
+    );
+    let output = root
+        .update(&api)
+        .args(["--repo", "owner/fork", "--check"])
+        .output()
+        .unwrap();
+    server.join().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .any(|line| line == format!("UPDATE-CHECK available {COMMIT} 1 0")));
+}
+
+#[test]
+fn switching_sources_after_an_interrupted_update_plans_removal_of_partial_files() {
+    let root = Install::new("interrupted-switch");
+    let stable = "3333333333333333333333333333333333333333";
+    let state = root.0.join(".installer/update.state");
+    fs::create_dir(root.0.join(".installer")).unwrap();
+    fs::write(
+        &state,
+        format!("commit {stable}\nfile installer/infamous.toml\n"),
+    )
+    .unwrap();
+    fs::write(
+        root.0.join("z-blocked"),
+        "blocks the second file's directory",
+    )
+    .unwrap();
+    let manifest =
+        infamous_installer::update::git_blob_sha(&root.0.join("installer/infamous.toml")).unwrap();
+    let manifest_entry =
+        format!(r#"{{"path":"installer/infamous.toml","type":"blob","sha":"{manifest}"}}"#);
+    let hello = "ce013625030ba8dba906f756967f9e9ca394464a";
+    let edge_tree = format!(
+        r#"{{"tree":[{manifest_entry},{{"path":"a-edge-only.c","type":"blob","sha":"{hello}"}},{{"path":"z-blocked/new.c","type":"blob","sha":"{hello}"}}]}}"#
+    );
+    let (api, server) = serve(
+        API_REPO,
+        vec![
+            ("/commits/edge", COMMIT.into()),
+            (TREE_PATH, edge_tree),
+            (
+                "/2222222222222222222222222222222222222222/a-edge-only.c",
+                "hello\n".into(),
+            ),
+            (
+                "/2222222222222222222222222222222222222222/z-blocked/new.c",
+                "hello\n".into(),
+            ),
+        ],
+    );
+    let output = root
+        .update(&api)
+        .env("INFAMOUS_UPDATE_RAW", format!("{api}/repos"))
+        .args(["--force", "--branch", "edge"])
+        .output()
+        .unwrap();
+    server.join().unwrap();
+    assert!(!output.status.success(), "{output:?}");
+    assert!(root.0.join("a-edge-only.c").is_file(), "{output:?}");
+    assert!(fs::read_to_string(state)
+        .unwrap()
+        .contains(&format!("commit {stable}\n")));
+
+    let (api, server) = serve(
+        API_REPO,
+        vec![
+            ("/commits/stable", stable.into()),
+            (
+                "/git/trees/3333333333333333333333333333333333333333?recursive=1",
+                format!(r#"{{"tree":[{manifest_entry}]}}"#),
+            ),
+        ],
+    );
+    let output = root
+        .update(&api)
+        .args(["--branch", "stable", "--check"])
+        .output()
+        .unwrap();
+    server.join().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("1 to remove"), "{stdout}");
 }

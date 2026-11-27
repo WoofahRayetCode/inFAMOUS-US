@@ -344,6 +344,7 @@ keep = [
   "installer/pgo/infamous-us.profdata",
   # Published for self-update: mapped to installer/infamous-installer.exe and inFamous.exe.
   "installer/bin/infamous-installer.exe", "installer/bin/infamous-launch.exe",
+  "installer/build-channel",
   # only the build files the tree needs ("**/CMakeLists.txt" also pulled in excluded folders that have one)
   "infamous-recomp/CMakeLists.txt",
   "ps3recomp/CMakeLists.txt",
@@ -372,10 +373,11 @@ forbid = [
   "**/gamedata*/**", "**/savedata*/**/*", "**/dev_hdd0/**",
 ]
 
-# `infamous-installer update` and the setup's "Update now": where new versions come from. The repository
-# is the curated github/ working copy (publish-github.cmd pushes it). Only files whose content differs are downloaded.
+# `infamous-installer update` resolves its channel through published GitHub releases.
 [update]
 repo = "WoofahRayetCode/inFAMOUS-US"
+releases = true
+# Development branches can still be selected explicitly with --branch.
 branch = "main"
 # Folder inside the repository that holds this tree ("" = the repository root).
 path = ""

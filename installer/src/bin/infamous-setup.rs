@@ -241,8 +241,7 @@ struct App {
     title: String,
     title_ids: Vec<String>,
     link_name: String,
-    update_repo: Option<String>,
-    update_branch: String,
+    update_manifest: Option<infamous_installer::manifest::Manifest>,
     repaint: Arc<dyn Fn() + Send + Sync>,
 
     game: Option<GameSource>,
@@ -282,8 +281,7 @@ impl App {
             title: "inFamous (US)".into(),
             title_ids: vec!["BCUS98119".into(), "BCES00220".into()],
             link_name: "Infamous (US)".into(),
-            update_repo: None,
-            update_branch: "main".into(),
+            update_manifest: None,
             repaint,
             game: None,
             game_state: Arc::new(Mutex::new((0, GameState::None))),
@@ -308,12 +306,11 @@ impl App {
                 app.payload_bytes = info.bytes;
                 app.title = info.manifest.game_title.clone();
                 app.title_ids = info.manifest.title_ids.clone();
-                app.update_repo = info.manifest.update_repo.clone();
-                app.update_branch = info.manifest.update_branch.clone();
                 if let Some(l) = info.manifest.link_name.clone() {
                     app.link_name = l;
                 }
                 app.source = Some(info.source);
+                app.update_manifest = Some(info.manifest);
             }
             Err(e) => app.load_error = Some(e),
         }
@@ -338,9 +335,12 @@ impl App {
         app
     }
 
-    /// Remember `dir` if it holds an installation and ask its installer whether GitHub has an update.
+    /// Remember `dir` if Setup can update it and check whether GitHub has an update.
     fn find_existing(&mut self, dir: PathBuf) -> bool {
-        if !setup::is_installed(&dir) {
+        let Some(manifest) = self.update_manifest.clone() else {
+            return false;
+        };
+        if !setup::can_update(&dir, &manifest) {
             return false;
         }
         self.existing = Some(dir.clone());
@@ -348,10 +348,8 @@ impl App {
         let gen = self.upd_gen;
         *self.upd.lock().unwrap() = (gen, UpdState::Checking);
         let (st, repaint) = (self.upd.clone(), self.repaint.clone());
-        let update_repo = self.update_repo.clone();
-        let update_branch = self.update_branch.clone();
         std::thread::spawn(move || {
-            let r = setup::check_update(&dir, update_repo.as_deref(), &update_branch);
+            let r = setup::check_update(&dir, &manifest);
             let mut g = st.lock().unwrap();
             if g.0 == gen {
                 g.1 = UpdState::Done(r);
@@ -369,14 +367,16 @@ impl App {
         let Some(source) = self.source.clone() else {
             return;
         };
+        let Some(manifest) = self.update_manifest.clone() else {
+            return;
+        };
         self.location = util::path_str(&dir);
         self.installer = Some(Installer::start_update(
             dir,
             self.title.clone(),
             self.start_menu,
             source,
-            self.update_repo.clone(),
-            self.update_branch.clone(),
+            manifest,
             self.repaint.clone(),
         ));
         self.updating = true;
