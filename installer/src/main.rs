@@ -10,7 +10,7 @@
 
 use infamous_installer::{
     bail, game, hash, iso, lock, manifest, payload, pipeline, python_bundle, toolchain, trophy,
-    update, upscalers, util,
+    update, update_channel, upscalers, util,
 };
 use manifest::Manifest;
 use pipeline::Vars;
@@ -46,9 +46,10 @@ OPTIONS
   --keep-fresh      (make-patches) reuse .installer/fresh from the last run
   -y, --yes         don't ask questions; fail instead
   --check           (update) only report whether an update is available
-  --expect-commit SHA (update) apply only if the branch is still at the reviewed commit
+  --expect-commit SHA (update) apply only if the source still resolves to the reviewed commit
   --repo OWNER/NAME (update) repository to update from (default: [update] in infamous.toml)
-  --branch NAME     (update) branch to update from (default: [update] branch, else main)
+  --channel NAME    (update) stable or bleeding-edge (defaults to the saved preference)
+  --branch NAME     (update) use a raw branch instead of a release channel
   --iso FILE        (extract-iso) the disc image
   --dkey FILE       (extract-iso) the image's disc key file; default: <image>.dkey next to it
   --key HEX         (extract-iso) the disc key as 32 hex digits
@@ -75,8 +76,10 @@ struct Opts {
     yes: bool,
     interactive: bool,
     check: bool,
+    finish_pending: bool,
     expect_commit: Option<String>,
     repo: Option<String>,
+    channel: Option<update::Channel>,
     branch: Option<String>,
     /// (install, set by update) keep the timestamps of generated files whose content did not
     /// change, so regenerating does not force the compiler to rebuild everything.
@@ -131,6 +134,7 @@ fn parse_args() -> Result<Opts> {
             "--keep-fresh" => o.keep_fresh = true,
             "-y" | "--yes" => o.yes = true,
             "--check" => o.check = true,
+            "--finish-pending" => o.finish_pending = true,
             "--expect-commit" => {
                 let commit = val(&mut i, &a)?;
                 if !update::is_commit_sha(&commit) {
@@ -139,6 +143,13 @@ fn parse_args() -> Result<Opts> {
                 o.expect_commit = Some(commit);
             }
             "--repo" => o.repo = Some(val(&mut i, &a)?),
+            "--channel" => {
+                let channel = val(&mut i, &a)?;
+                o.channel = Some(
+                    update::Channel::parse(&channel)
+                        .ctx(|| "--channel needs stable or bleeding-edge")?,
+                );
+            }
             "--branch" => o.branch = Some(val(&mut i, &a)?),
             _ if !a.starts_with('-') && o.game.is_none() && Path::new(&a).exists() => {
                 o.game = Some(a.into())
@@ -152,6 +163,15 @@ fn parse_args() -> Result<Opts> {
     }
     if o.expect_commit.is_some() && o.cmd != "update" && o.cmd != "help" {
         bail!("--expect-commit applies to the update command");
+    }
+    if o.finish_pending && (o.cmd != "update" || o.check || o.expect_commit.is_none()) {
+        bail!("--finish-pending requires update --expect-commit SHA");
+    }
+    if o.channel.is_some() && o.cmd != "update" && o.cmd != "help" {
+        bail!("--channel applies to the update command");
+    }
+    if o.channel.is_some() && o.branch.is_some() {
+        bail!("--branch and --channel cannot be used together");
     }
     Ok(o)
 }
@@ -608,9 +628,17 @@ fn restore_mtimes(before: &[(PathBuf, String, std::time::SystemTime)]) -> usize 
 }
 
 fn cmd_update(s: &Session) -> Result<()> {
+    if s.o.finish_pending {
+        let commit = s.o.expect_commit.as_deref().unwrap();
+        update::verify_pending(&s.root, commit)?;
+        return rebuild_update(s, commit);
+    }
     println!("{} PC port: update", s.m.game_title);
     println!("Folder: {}", s.root.display());
-    let remote = update::Remote::new(&s.m, s.o.repo.as_deref(), s.o.branch.as_deref())?;
+    let channel = s.o.channel.or_else(|| {
+        (s.o.branch.is_none() && s.m.update_releases).then(|| update_channel::preferred(&s.root))
+    });
+    let remote = update::Remote::new(&s.m, s.o.repo.as_deref(), s.o.branch.as_deref(), channel)?;
     let st = lock::State::load(&s.root.join(".installer").join("state"));
     if st.eboot.is_none() && !s.o.check && !s.o.force {
         bail!(
@@ -618,11 +646,17 @@ fn cmd_update(s: &Session) -> Result<()> {
              edits an update would overwrite. Run the installer first, or pass --force to update anyway."
         );
     }
+    let _update_lock = if s.o.check {
+        None
+    } else {
+        update::install_lock(&s.root)?
+    };
 
     util::heading("Checking for updates");
     util::info(&format!(
-        "github.com/{}  (branch {})",
-        remote.repo, remote.branch
+        "github.com/{}  ({})",
+        remote.repo,
+        remote.source_label()
     ));
     let plan = update::plan(&s.root, &s.m, &remote)?;
     if let Some(expected) = &s.o.expect_commit {
@@ -631,7 +665,9 @@ fn cmd_update(s: &Session) -> Result<()> {
         }
     }
     let short = &plan.commit[..10];
-    let pending_marker = update::pending_marker(&s.root);
+    if let Some(tag) = &plan.release_tag {
+        util::info(&format!("Release {tag}"));
+    }
     let availability = plan.availability(&s.root);
     if plan.is_empty() {
         util::info(&format!("Already up to date (version {short})."));
@@ -670,47 +706,77 @@ fn cmd_update(s: &Session) -> Result<()> {
 
     if !plan.is_empty() {
         util::heading("Applying file changes");
-        util::write_file(&pending_marker, plan.commit.as_bytes())?;
-        update::apply(&s.root, &remote, &plan, &mut |l| util::info(&l))?;
+    }
+    update::apply(&s.root, &remote, &plan, &mut |l| util::info(&l), &|| false)?;
+    if !plan.is_empty() {
         util::info(&format!("Files updated to version {short}."));
     }
+    if cfg!(windows) && plan.release_tag.is_some() {
+        let mut command = update::finish_command(&s.root, &plan.commit);
+        for (flag, path) in [
+            ("--game", &s.o.game),
+            ("--python", &s.o.python),
+            ("--rpcs3", &s.o.rpcs3),
+        ] {
+            if let Some(path) = path {
+                command.arg(flag).arg(util::absolute(path));
+            }
+        }
+        for (flag, count) in [("--jobs", s.o.jobs), ("--build-jobs", s.o.build_jobs)] {
+            if let Some(count) = count {
+                command.arg(flag).arg(count.to_string());
+            }
+        }
+        if s.o.force {
+            command.arg("--force");
+        }
+        let status = command.status().ctx(|| "starting the updated installer")?;
+        if !status.success() {
+            bail!("the updated installer exited with {status}");
+        }
+        return Ok(());
+    }
+    rebuild_update(s, &plan.commit)
+}
 
+fn rebuild_update(s: &Session, commit: &str) -> Result<()> {
     // Rebuild with the (possibly new) manifest and patch set. Regenerate only if the patch set's
     // results are no longer what is on disk; files that come out identical keep their timestamps.
     let m = Manifest::load(&s.installer_dir.join("infamous.toml"))?;
-    let lock_dir = s
-        .game()
-        .ok()
-        .and_then(|g| lock::region_dir(&s.installer_dir, g.title_id()))
-        .unwrap_or_else(|| s.installer_dir.clone());
-    let lock = lock::Lock::load(&lock_dir.join("generated.lock"))?
-        .ctx(|| "the update has no installer/generated.lock")?;
-    let regen = !pipeline::lock_satisfied(&s.root, &lock)?;
-    if regen {
-        util::info("The port's patches changed: the game code is regenerated from your files (a few minutes).");
-    }
     let o = Opts {
         cmd: "install".into(),
         root: Some(s.root.clone()),
+        game: s.o.game.clone(),
         python: s.o.python.clone(),
         jobs: s.o.jobs,
         build_jobs: s.o.build_jobs,
         rpcs3: s.o.rpcs3.clone(),
         yes: true,
-        regen,
         keep_mtimes: true,
         force: s.o.force,
         ..Default::default()
     };
-    let s2 = Session {
+    let mut s2 = Session {
         o,
         root: s.root.clone(),
         installer_dir: s.installer_dir.clone(),
         m,
     };
+    let game = s2.game()?;
+    let region = lock::region_dir(&s2.installer_dir, game.title_id());
+    let lock_dir = region.as_deref().unwrap_or(&s2.installer_dir);
+    let lock = lock::Lock::load(&lock_dir.join("generated.lock"))?
+        .ctx(|| "the update has no installer/generated.lock")?;
+    s2.o.regen = !pipeline::lock_satisfied(&s2.root, &lock)?;
+    if s2.o.regen {
+        util::info("The port's patches changed: the game code is regenerated from your files (a few minutes).");
+    }
+    s2.o.game = Some(game.root);
     cmd_install(&s2)?;
-    let _ = std::fs::remove_file(&pending_marker);
-    util::info(&format!("Updated to version {short}."));
+    let pending_marker = update::pending_marker(&s.root);
+    std::fs::remove_file(&pending_marker)
+        .ctx(|| format!("removing {}", pending_marker.display()))?;
+    util::info(&format!("Updated to version {}.", &commit[..10]));
     Ok(())
 }
 

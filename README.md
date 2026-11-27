@@ -45,8 +45,8 @@ To play:
 
 ## Easy install
 
-Download the `inFamous-Setup` artifact from a successful **Setup app** workflow run and open
-`inFamous Setup.exe`. Select your own US or European ISO or an extracted folder containing
+Download `inFamous-Setup.exe` from the [latest stable release](https://github.com/WoofahRayetCode/inFAMOUS-US/releases/latest).
+Select your own US or European ISO or an extracted folder containing
 `PS3_GAME`, then click **Install**. Setup installs missing build tools and builds the game on
 your PC. When the build finishes, click **Play**. [Setup details](installer/README.md#the-setup-program-what-players-download)
 
@@ -54,12 +54,20 @@ your PC. When the build finishes, click **Play**. [Setup details](installer/READ
 
 The launcher checks for updates in the background when it opens. Use **Update** to check
 manually, or select **Update available** to open **What's New** before choosing **Install Update**.
-The launcher shows the download and build progress, then restarts when the update finishes.
+The updater downloads changed files into the existing installation. The launcher shows the
+download and build progress, then restarts into the verified launcher from that release.
 
-You can also run `Update inFamous (US).cmd` in the root folder. Both routes pull changed
-files from `main`, including the installer and launcher published by the Setup app workflow,
-and recompile only what changed. Release downloads are available on
+**Stable** is the default update channel. To try successful Windows builds from the default
+branch sooner, open **Support → Build & updates → Update channel** and select **Bleeding Edge**.
+The launcher identifies an installed Bleeding Edge build in its header. Select **Stable** again
+to review and install the current stable version. The update command in the installation folder
+uses the same preference.
+
+Both channels have standalone Setup downloads on
 [GitHub Releases](https://github.com/WoofahRayetCode/inFAMOUS-US/releases).
+If your launcher predates update channels, open a channel-enabled Stable Setup, select your
+existing installation, and choose **Update now**. Setup uses the installed game files and
+keeps your saves and settings.
 
 ## Building manually
 

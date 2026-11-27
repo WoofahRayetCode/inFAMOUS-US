@@ -76,6 +76,8 @@ pub struct Manifest {
     /// holding the `export` tree). `None` = updating is not configured.
     pub update_repo: Option<String>,
     pub update_branch: String,
+    /// Use published GitHub releases for the Stable and Bleeding Edge update channels.
+    pub update_releases: bool,
     /// Folder inside the repository that holds the tree ("" = the repository root).
     pub update_path: String,
     /// `[update] obsolete`: files an older setup or update left behind that the repository no
@@ -270,6 +272,7 @@ impl Manifest {
             update_branch: opt_s(update, "update", "branch")?
                 .filter(|b| !b.trim().is_empty())
                 .unwrap_or_else(|| "main".into()),
+            update_releases: boolean(update, "update", "releases")?,
             update_path: opt_s(update, "update", "path")?
                 .unwrap_or_default()
                 .trim_matches('/')

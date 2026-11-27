@@ -60,15 +60,22 @@ reruns generation once before patching. `--regen` starts the pipeline over immed
 ```bat
 infamous-installer update            :: download what changed on GitHub, rebuild what that needs
 infamous-installer update --check    :: only report whether an update is available
+infamous-installer update --channel bleeding-edge --check
 ```
 
-The repository is set in `infamous.toml` (`[update] repo / branch / path`). The updater asks
-GitHub for the branch's latest commit and its file list (two API requests), compares each file's
+The official manifest enables GitHub release channels in `infamous.toml`. Stable is the default.
+The launcher saves the opted-in channel under `.installer`, and the updater uses that selection
+unless the command specifies `--channel` or `--branch`. The explicit branch option supports
+development trees and forks.
+
+The updater resolves the selected release tag to its commit and file list, compares each file's
 git blob hash with the local file (a CRLF copy of an LF file counts as equal), downloads only the
 differing files from raw.githubusercontent.com (or the commit's zip when more than 150 changed),
 verifies every download against its blob hash, then moves them into place. Files an earlier update
 installed that the repository no longer has are removed; `.installer/update.state` records the
-commit and file list. If `generated.lock` no longer matches what is on disk, the game code is
+commit and file list. On Windows the CLI from the downloaded release finishes the staged build
+for that exact commit. Setup's **Update now** uses the same incremental path for existing
+installations. If `generated.lock` no longer matches what is on disk, the game code is
 regenerated from the player's files and re-patched; generated files that come out identical keep
 their timestamps, so only changed translation units recompile. HTTP goes through `curl.exe` and
 zips through `tar.exe` (both part of Windows 10/11); a private repository needs `GITHUB_TOKEN`.
@@ -77,8 +84,8 @@ those replace the installer and the game's launcher too (a running copy is renam
 
 ## The setup program (what players download)
 
-Download the `inFamous-Setup` artifact from a successful **Setup app** workflow run and open
-`inFamous Setup.exe`. Select your own US (`BCUS98119`) or European (`BCES00220`) disc image
+Download `inFamous-Setup.exe` from [the latest stable release](https://github.com/WoofahRayetCode/inFAMOUS-US/releases/latest).
+Select your own US (`BCUS98119`) or European (`BCES00220`) disc image
 or extracted game folder, then click **Install**. Setup fills in an install location and lets you
 change it or turn off shortcuts on the same screen.
 
@@ -87,6 +94,14 @@ game on your PC. Windows may ask for approval. If your ISO is encrypted, click *
 Setup cannot find it, select your local `rpcs3.exe`. When the build finishes, click **Play**.
 Run Setup again with the same game and location to reuse a complete copy of the disc and the
 incremental build. Setup shows details if a step fails so you can correct the issue and retry.
+
+### Publishing a build
+
+To publish Stable, run **Setup app** on the default branch from the Actions tab and check
+**Publish this default-branch build as the stable release**. After the build and tests pass,
+the workflow publishes the standalone Setup with a UTC timestamp tag. A successful ordinary
+build on the default branch publishes a Bleeding Edge prerelease. Each tag carries the source
+and both Windows updater binaries from the same build.
 
 Build it (maintainer, after `make-patches`):
 
@@ -177,9 +192,9 @@ real edits instead of every line. Run `make-patches` on Windows, because that is
 ### Launcher save management
 
 The standard build opens a dashboard with **Play**, **Display & Controls**, **Saves**,
-**Achievements**, and **Support**. The launcher checks the branch in the installed manifest
+**Achievements**, and **Support**. The launcher checks the selected update channel
 in the background and offers a manual check through **Update**. The update preview shows
-incoming commit summaries when the installed revision is known. If the branch moves before
+incoming commit summaries when the installed revision is known. If a new release appears before
 installation starts, the launcher asks you to check again so you can review the newer changes.
 **Support** opens game logs. Launching with `--play` goes straight into the game.
 

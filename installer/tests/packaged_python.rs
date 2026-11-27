@@ -12,7 +12,45 @@ fn packaged_python_runs_offline() {
     let root = std::env::temp_dir().join(format!("inFamous package test {}", std::process::id()));
     fs::create_dir(&root).unwrap();
     let payload = Payload::open(&setup).unwrap().expect("Setup payload");
+    let channel_marker = root.join("installer/build-channel");
+    let channel = std::env::var("INFAMOUS_TEST_BUILD_CHANNEL").ok();
+    if let Some(channel) = &channel {
+        let previous_channel = match channel.as_str() {
+            "stable" => "bleeding-edge\n",
+            "bleeding-edge" => "stable\n",
+            _ => panic!("unexpected build channel {channel:?}"),
+        };
+        assert_eq!(
+            payload.read("installer/build-channel").unwrap().as_deref(),
+            Some(format!("{channel}\n").as_bytes())
+        );
+        // Setup uses the same extraction path when installing over an existing build.
+        fs::create_dir(root.join("installer")).unwrap();
+        fs::write(&channel_marker, previous_channel).unwrap();
+    }
     payload.extract(&root, &mut |_, _| {}).unwrap();
+    if let Some(bin) = std::env::var_os("INFAMOUS_TEST_RELEASE_BIN").map(PathBuf::from) {
+        let manifest =
+            infamous_installer::manifest::Manifest::load(&root.join("installer/infamous.toml"))
+                .unwrap();
+        let launcher = format!("{}.exe", manifest.game_title);
+        for (installed, built) in [
+            ("installer/infamous-installer.exe", "infamous-installer.exe"),
+            (launcher.as_str(), "infamous-launch.exe"),
+        ] {
+            assert_eq!(
+                infamous_installer::hash::sha256_file(&root.join(installed)).unwrap(),
+                infamous_installer::hash::sha256_file(&bin.join(built)).unwrap(),
+                "Setup must install the same {built} published for in-place updates"
+            );
+        }
+    }
+    if let Some(channel) = channel {
+        assert_eq!(
+            fs::read(channel_marker).unwrap(),
+            format!("{channel}\n").as_bytes()
+        );
+    }
 
     // Exercise the installed CLI's selection and first-run extraction with only Windows on PATH.
     let system = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32");

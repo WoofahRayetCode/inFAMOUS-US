@@ -1,7 +1,7 @@
 //! `infamous-installer update`: bring an installed copy up to date with the GitHub repository that
 //! holds the port's published tree (the output of `export`).
 //!
-//! 1. Ask GitHub for the branch's latest commit and that commit's full file list. GitHub gives
+//! 1. Resolve the selected release tag or branch to a commit and fetch its full file list. GitHub gives
 //!    every file's git blob hash, so comparing it with the hash of the local file
 //!    (`sha1("blob <len>\0" + bytes)`) says exactly which files differ, without downloading them.
 //! 2. Download only those files (raw.githubusercontent.com), or the commit's zip if many changed,
@@ -21,17 +21,75 @@ use std::process::{Command, Stdio};
 
 /// More changed files than this -> one zip download instead of one request per file.
 const ZIP_THRESHOLD: usize = 150;
+const INSTALL_LOCK_PATH: &str = "installer/.update.lock";
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum Channel {
+    #[default]
+    Stable,
+    BleedingEdge,
+}
+
+impl Channel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Stable => "stable",
+            Self::BleedingEdge => "bleeding-edge",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Stable => "Stable",
+            Self::BleedingEdge => "Bleeding Edge",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "stable" => Some(Self::Stable),
+            "bleeding-edge" => Some(Self::BleedingEdge),
+            _ => None,
+        }
+    }
+}
+
+pub const BUILD_CHANNEL_PATH: &str = "installer/build-channel";
+const BLEEDING_EDGE_TAG_PREFIX: &str = "bleeding-edge-";
+const INSTALLER_RELEASE_PATH: &str = "installer/bin/infamous-installer.exe";
+const LAUNCHER_RELEASE_PATH: &str = "installer/bin/infamous-launch.exe";
+const SETUP_ASSET_NAME: &str = "inFamous-Setup.exe";
+const JSON_ACCEPT: Option<&str> = Some("application/vnd.github+json");
+
+enum Source {
+    Branch(String),
+    Release(Channel),
+}
 
 pub struct Remote {
     pub repo: String,
-    pub branch: String,
+    source: Source,
     /// Folder inside the repository that holds the tree ("" = repository root).
     pub path: String,
     token: Option<String>,
 }
 
 impl Remote {
-    pub fn new(m: &Manifest, repo: Option<&str>, branch: Option<&str>) -> Result<Remote> {
+    pub fn new(
+        m: &Manifest,
+        repo: Option<&str>,
+        branch: Option<&str>,
+        channel: Option<Channel>,
+    ) -> Result<Remote> {
+        let source = match (branch, channel) {
+            (Some(_), Some(_)) => bail!("--branch and --channel cannot be used together"),
+            (Some(branch), None) => Source::Branch(branch.into()),
+            (None, channel) if m.update_releases => Source::Release(channel.unwrap_or_default()),
+            (None, Some(Channel::BleedingEdge)) => {
+                bail!("Bleeding Edge updates require [update] releases = true in installer/infamous.toml")
+            }
+            (None, _) => Source::Branch(m.update_branch.clone()),
+        };
         let repo = repo
             .map(|r| r.to_string())
             .or_else(|| m.update_repo.clone())
@@ -42,12 +100,17 @@ impl Remote {
             .filter(|t| !t.trim().is_empty());
         Ok(Remote {
             repo,
-            branch: branch
-                .map(|b| b.to_string())
-                .unwrap_or_else(|| m.update_branch.clone()),
+            source,
             path: m.update_path.clone(),
             token,
         })
+    }
+
+    pub fn source_label(&self) -> String {
+        match &self.source {
+            Source::Branch(branch) => format!("branch {branch}"),
+            Source::Release(channel) => format!("{} channel", channel.label()),
+        }
     }
 }
 
@@ -456,6 +519,7 @@ pub struct Entry {
 #[derive(Debug)]
 pub struct Plan {
     pub commit: String,
+    pub release_tag: Option<String>,
     pub fetch: Vec<Entry>,
     pub delete: Vec<String>,
     /// Every file the repository has (local paths), for the state file.
@@ -503,11 +567,7 @@ impl Plan {
 
     pub fn availability(&self, root: &Path) -> Availability {
         if !self.is_empty() {
-            if self
-                .previous_commit
-                .as_deref()
-                .is_some_and(|c| c.eq_ignore_ascii_case(&self.commit))
-            {
+            if self.previous_commit.as_ref() == Some(&self.commit) {
                 Availability::Repair
             } else {
                 Availability::Update
@@ -524,6 +584,62 @@ impl Plan {
 
 pub fn pending_marker(root: &Path) -> PathBuf {
     root.join(".installer").join("update.pending")
+}
+
+/// Keep Setup and the command-line updater from changing the same installation concurrently.
+pub fn install_lock(root: &Path) -> Result<Option<fs::File>> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_DELETE_ON_CLOSE;
+
+        // The manifest directory already exists even when --force targets a fresh checkout.
+        fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .share_mode(0)
+            .custom_flags(FILE_FLAG_DELETE_ON_CLOSE)
+            .open(root.join(INSTALL_LOCK_PATH))
+            .map(Some)
+            .ctx(|| "could not lock this installation for updating (another update may be running)")
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = root;
+        Ok(None)
+    }
+}
+
+/// The rebuild is handed to the newly installed CLI without checking the release catalog again.
+pub fn verify_pending(root: &Path, commit: &str) -> Result<()> {
+    let marker = fs::read_to_string(pending_marker(root))
+        .ctx(|| "the staged update has no pending rebuild")?;
+    let state = UpdateState::load(root);
+    if marker.trim() != commit || state.commit.as_deref() != Some(commit) {
+        bail!("the staged update does not match version {commit}; check for updates again");
+    }
+    Ok(())
+}
+
+pub fn installed_cli(root: &Path) -> PathBuf {
+    let cli = root.join("installer").join("infamous-installer");
+    if cfg!(windows) {
+        cli.with_extension("exe")
+    } else {
+        cli
+    }
+}
+
+pub fn launcher_name(game_title: &str) -> String {
+    format!("{game_title}.exe")
+}
+
+pub fn finish_command(root: &Path, commit: &str) -> Command {
+    let mut command = Command::new(installed_cli(root));
+    command.args(["update", "--finish-pending", "--expect-commit", commit]);
+    command.arg("--root").arg(root).current_dir(root);
+    command
 }
 
 /// `.installer/update.state`: the commit this folder was last updated to and the files it got.
@@ -609,7 +725,12 @@ pub fn local_matches(p: &Path, sha: &str) -> bool {
     if blob_sha(&d) == sha {
         return true;
     }
-    d.windows(2).any(|w| w == b"\r\n") && blob_sha(&crlf_to_lf(&d)) == sha
+    !is_executable(p) && d.windows(2).any(|w| w == b"\r\n") && blob_sha(&crlf_to_lf(&d)) == sha
+}
+
+fn is_executable(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
 }
 
 /// Windows batch/PowerShell scripts are written with CRLF (cmd.exe misreads labels in LF files).
@@ -633,11 +754,23 @@ fn lf_to_crlf(d: &[u8]) -> Vec<u8> {
 fn protected(m: &Manifest, p: &str) -> bool {
     let l = p.to_ascii_lowercase();
     let top = l.split('/').next().unwrap_or("");
-    if [".installer", ".git", ".github"].contains(&top) {
+    if l == INSTALL_LOCK_PATH || [".installer", ".git", ".github"].contains(&top) {
         return true;
     }
     if let Some(link) = &m.link_name {
         if top == link.to_ascii_lowercase() {
+            return true;
+        }
+    }
+    let port = m.port.to_ascii_lowercase();
+    if let Some(local) = l
+        .strip_prefix(&port)
+        .and_then(|rest| rest.strip_prefix('/'))
+    {
+        if matches!(local, "settings.ini" | "controls.ini")
+            || local.starts_with("gamedata/")
+            || local.starts_with("user-backups/")
+        {
             return true;
         }
     }
@@ -653,26 +786,126 @@ pub fn is_commit_sha(commit: &str) -> bool {
     commit.len() == 40 && commit.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
+fn published_release_tag(release: &Json, channel: Channel) -> Option<&str> {
+    let prerelease = channel == Channel::BleedingEdge;
+    if !matches!(release.get("draft"), Some(Json::Bool(false)))
+        || !matches!(release.get("prerelease"), Some(Json::Bool(flag)) if *flag == prerelease)
+    {
+        return None;
+    }
+    let tag = release.get("tag_name")?.str()?;
+    let published = release.get("published_at")?.str()?;
+    if tag.trim().is_empty()
+        || published.trim().is_empty()
+        || tag.starts_with(BLEEDING_EDGE_TAG_PREFIX) != prerelease
+    {
+        return None;
+    }
+    Some(tag)
+}
+
+fn has_setup_asset(release: &Json) -> bool {
+    matches!(release.get("assets"), Some(Json::Arr(assets)) if assets.iter().any(|asset| {
+        asset.get("name").and_then(Json::str) == Some(SETUP_ASSET_NAME)
+            && asset.get("state").and_then(Json::str) == Some("uploaded")
+            && matches!(asset.get("size"), Some(Json::Num(size)) if *size > 0.0)
+    }))
+}
+
+fn bleeding_edge_build_number(tag: &str) -> Option<(u64, u64)> {
+    let (run, attempt) = tag
+        .strip_prefix(BLEEDING_EDGE_TAG_PREFIX)?
+        .split_once('-')?;
+    let ordinal = |text: &str| {
+        text.parse::<u64>()
+            .ok()
+            .filter(|n| *n > 0 && n.to_string() == text)
+    };
+    Some((ordinal(run)?, ordinal(attempt)?))
+}
+
+fn release_tag(r: &Remote, api: &str, channel: Channel) -> Result<String> {
+    let missing = || format!("no {} release is published for {}", channel.label(), r.repo);
+    if channel == Channel::Stable {
+        let url = format!("{api}/releases/latest");
+        let data = match get_metadata(r, &url, JSON_ACCEPT)? {
+            Metadata::Found(data) => data,
+            Metadata::Missing(err) => return Err(Error(format!("{}: {err}", missing()))),
+        };
+        let release = parse_json(&data)?;
+        let tag = published_release_tag(&release, channel).ctx(missing)?;
+        if !has_setup_asset(&release) {
+            bail!(
+                "no channel-enabled Stable build is published for {} yet (release {tag} is missing {SETUP_ASSET_NAME})",
+                r.repo
+            );
+        }
+        return Ok(tag.to_string());
+    }
+
+    const PER_PAGE: usize = 100;
+    let mut newest: Option<((u64, u64), String)> = None;
+    for page in 1.. {
+        let url = format!("{api}/releases?per_page={PER_PAGE}&page={page}");
+        let Json::Arr(releases) = parse_json(&get_bytes(r, &url, JSON_ACCEPT)?)? else {
+            bail!("unexpected answer from GitHub (no list of releases)");
+        };
+        // An older run may finish later than a newer one. Order by the run number and attempt.
+        if let Some((build, tag)) = releases
+            .iter()
+            .filter(|release| has_setup_asset(release))
+            .filter_map(|release| {
+                let tag = published_release_tag(release, channel)?;
+                Some((bleeding_edge_build_number(tag)?, tag))
+            })
+            .max()
+        {
+            if newest
+                .as_ref()
+                .is_none_or(|(old_build, _)| build > *old_build)
+            {
+                newest = Some((build, tag.to_string()));
+            }
+        }
+        if releases.len() < PER_PAGE {
+            break;
+        }
+    }
+    newest.map(|(_, tag)| tag).ctx(missing)
+}
+
 pub fn plan(root: &Path, m: &Manifest, r: &Remote) -> Result<Plan> {
     let api = format!("{}/repos/{}", api_base(), r.repo);
+    let (reference, release) = match &r.source {
+        Source::Branch(branch) => (branch.to_string(), None),
+        Source::Release(channel) => {
+            let tag = release_tag(r, &api, *channel)
+                .ctx(|| format!("checking the {} channel", channel.label()))?;
+            (format!("tags/{tag}"), Some((*channel, tag)))
+        }
+    };
+    let source_label = match &release {
+        Some((channel, tag)) => format!("{} release {tag}", channel.label()),
+        None => r.source_label(),
+    };
     let commit = get_bytes(
         r,
-        &format!("{api}/commits/{}", url_path(&r.branch)),
+        &format!("{api}/commits/{}", url_path(&reference)),
         Some("application/vnd.github.sha"),
-    )?;
+    )
+    .ctx(|| format!("resolving {source_label}"))?;
     let commit = String::from_utf8_lossy(&commit).trim().to_string();
     if !is_commit_sha(&commit) {
         bail!(
-            "GitHub did not return a commit for {} branch {} (got '{}')",
+            "GitHub did not return a commit for {} {source_label} (got '{}')",
             r.repo,
-            r.branch,
             commit.chars().take(60).collect::<String>()
         );
     }
     let tree = get_bytes(
         r,
         &format!("{api}/git/trees/{commit}?recursive=1"),
-        Some("application/vnd.github+json"),
+        JSON_ACCEPT,
     )?;
     let tree = parse_json(&tree)?;
     if matches!(tree.get("truncated"), Some(Json::Bool(true))) {
@@ -687,6 +920,7 @@ pub fn plan(root: &Path, m: &Manifest, r: &Remote) -> Result<Plan> {
         format!("{}/", r.path)
     };
 
+    let launcher = launcher_name(&m.game_title);
     let mut remote: BTreeMap<String, Entry> = BTreeMap::new();
     for it in items {
         if it.get("type").and_then(Json::str) != Some("blob")
@@ -706,15 +940,15 @@ pub fn plan(root: &Path, m: &Manifest, r: &Remote) -> Result<Plan> {
         // Prebuilt binaries the repository may carry: they replace the installer and the game's
         // launcher (which are not source files, so they are otherwise never touched).
         let local = match local.to_ascii_lowercase().as_str() {
-            "installer/bin/infamous-installer.exe" if cfg!(windows) => {
+            INSTALLER_RELEASE_PATH if cfg!(windows) => {
                 "installer/infamous-installer.exe".to_string()
             }
-            "installer/bin/infamous-launch.exe" if cfg!(windows) => format!("{}.exe", m.game_title),
+            LAUNCHER_RELEASE_PATH if cfg!(windows) => launcher.clone(),
             l if l.starts_with("installer/bin/") => continue,
             _ => local.to_string(),
         };
         let binary = local.eq_ignore_ascii_case("installer/infamous-installer.exe")
-            || local.eq_ignore_ascii_case(&format!("{}.exe", m.game_title));
+            || local.eq_ignore_ascii_case(&launcher);
         let local = local.as_str();
         if local.is_empty()
             || local.split('/').any(|c| c == ".." || c.is_empty())
@@ -738,9 +972,8 @@ pub fn plan(root: &Path, m: &Manifest, r: &Remote) -> Result<Plan> {
     }
     if remote.is_empty() {
         bail!(
-            "{} (branch {}{}) has no files to install",
+            "{} ({source_label}{}) has no files to install",
             r.repo,
-            r.branch,
             if r.path.is_empty() {
                 String::new()
             } else {
@@ -754,6 +987,33 @@ pub fn plan(root: &Path, m: &Manifest, r: &Remote) -> Result<Plan> {
             r.repo,
             if r.path.is_empty() { " at the repository root".to_string() } else { format!(" under {}", r.path) }
         );
+    }
+    if let Some((channel, _)) = &release {
+        let marker = blob_sha(format!("{}\n", channel.as_str()).as_bytes());
+        if remote
+            .get(BUILD_CHANNEL_PATH)
+            .is_none_or(|entry| entry.sha != marker)
+        {
+            bail!(
+                "no channel-enabled {} build is published for {} yet ({source_label} is missing a matching {BUILD_CHANNEL_PATH})",
+                channel.label(),
+                r.repo
+            );
+        }
+        if cfg!(windows) {
+            for (local, path) in [
+                ("installer/infamous-installer.exe", INSTALLER_RELEASE_PATH),
+                (launcher.as_str(), LAUNCHER_RELEASE_PATH),
+            ] {
+                if remote.get(local).is_none_or(|entry| {
+                    entry.repo_path != format!("{prefix}{path}")
+                        || entry.size == 0
+                        || !is_commit_sha(&entry.sha)
+                }) {
+                    bail!("{source_label} is missing the updater executable {path}");
+                }
+            }
+        }
     }
 
     let fetch: Vec<Entry> = remote
@@ -777,6 +1037,7 @@ pub fn plan(root: &Path, m: &Manifest, r: &Remote) -> Result<Plan> {
     }
     Ok(Plan {
         commit,
+        release_tag: release.map(|(_, tag)| tag),
         fetch,
         delete,
         all: remote.into_keys().collect(),
@@ -788,14 +1049,19 @@ pub fn plan(root: &Path, m: &Manifest, r: &Remote) -> Result<Plan> {
 #[derive(Clone, Debug)]
 pub struct Preview {
     pub commit: String,
+    pub release_tag: Option<String>,
     pub availability: Availability,
     pub changes: Vec<String>,
     pub notes_status: Option<String>,
 }
 
 pub fn preview(root: &Path) -> Result<Preview> {
+    preview_for_channel(root, crate::update_channel::preferred(root))
+}
+
+pub fn preview_for_channel(root: &Path, channel: Channel) -> Result<Preview> {
     let manifest = Manifest::load(&root.join("installer/infamous.toml"))?;
-    let remote = Remote::new(&manifest, None, None)?;
+    let remote = Remote::new(&manifest, None, None, Some(channel))?;
     let plan = plan(root, &manifest, &remote)?;
     let availability = plan.availability(root);
     let (changes, notes_status) = if availability == Availability::Update {
@@ -817,6 +1083,7 @@ pub fn preview(root: &Path) -> Result<Preview> {
     };
     Ok(Preview {
         commit: plan.commit,
+        release_tag: plan.release_tag,
         availability,
         changes,
         notes_status,
@@ -827,8 +1094,14 @@ fn change_notes(r: &Remote, plan: &Plan) -> Result<(Vec<String>, Option<String>)
     let api = format!("{}/repos/{}", api_base(), r.repo);
     let target = &plan.commit;
     let base = plan.previous_commit.as_deref().filter(|c| is_commit_sha(c));
-    let accept = Some("application/vnd.github+json");
+    let accept = JSON_ACCEPT;
     if let Some(base) = base {
+        if base.eq_ignore_ascii_case(target) {
+            return Ok((
+                Vec::new(),
+                Some("No new commits. The installer will repair files or finish preparing this version.".into()),
+            ));
+        }
         let url = format!("{api}/compare/{base}...{target}");
         if let Metadata::Found(comparison) = get_metadata(r, &url, accept)? {
             if let Some(notes) = incoming_notes(&parse_json(&comparison)?, base)? {
@@ -909,6 +1182,8 @@ fn commit_subjects<'a>(commits: impl Iterator<Item = &'a Json>) -> (Vec<String>,
             "Refresh updater binaries from Setup app build"
                 | "Keep updater binaries current after successful Windows builds"
         ) || subject.starts_with("Rebuilt installer and launcher binaries")
+            || subject.starts_with("Distribute stable build ")
+            || subject.starts_with("Distribute bleeding-edge build ")
         {
             continue;
         }
@@ -958,18 +1233,18 @@ fn find_zip_top(dir: &Path) -> Result<PathBuf> {
 }
 
 /// Download, verify and install the plan's files. `log` gets one line per step.
-pub fn apply(root: &Path, r: &Remote, plan: &Plan, log: &mut dyn FnMut(String)) -> Result<()> {
+pub fn apply(
+    root: &Path,
+    r: &Remote,
+    plan: &Plan,
+    log: &mut dyn FnMut(String),
+    stopped: &dyn Fn() -> bool,
+) -> Result<()> {
     let work = root.join(".installer").join("update");
     let _ = fs::remove_dir_all(&work);
-    // Old copies of programs that were running during the previous update (X.old next to X.exe).
-    for d in [root.to_path_buf(), root.join("installer")] {
-        for f in fs::read_dir(&d).into_iter().flatten().flatten() {
-            let p = f.path();
-            if p.extension().map(|e| e == "old").unwrap_or(false)
-                && p.with_extension("exe").is_file()
-            {
-                let _ = fs::remove_file(&p);
-            }
+    for path in plan.all.iter().map(|file| util::join_slash(root, file)) {
+        if is_executable(&path) && path.is_file() {
+            cleanup_old_images(&path);
         }
     }
     fs::create_dir_all(&work).ctx(|| format!("creating {}", work.display()))?;
@@ -1035,6 +1310,9 @@ pub fn apply(root: &Path, r: &Remote, plan: &Plan, log: &mut dyn FnMut(String)) 
     } else {
         let n = plan.fetch.len();
         for (i, e) in plan.fetch.iter().enumerate() {
+            if stopped() {
+                bail!("cancelled");
+            }
             log(format!("[{}/{n}] {}", i + 1, e.path));
             let p = work.join("f").join(format!("{i}"));
             get_file(
@@ -1054,34 +1332,82 @@ pub fn apply(root: &Path, r: &Remote, plan: &Plan, log: &mut dyn FnMut(String)) 
         }
     }
 
-    // 2. Into place.
+    if stopped() {
+        bail!("cancelled");
+    }
+    // 2. Into place. Keep the marker if installation is interrupted or the rebuild fails.
+    util::write_file(&pending_marker(root), plan.commit.as_bytes())?;
     for (src, e) in &staged {
         let dst = util::join_slash(root, &e.path);
         util::ensure_parent(&dst)?;
-        if dst.exists() && fs::remove_file(&dst).is_err() {
-            // A running program (this installer, or the game's launcher) can't be deleted on
-            // Windows but can be renamed; the old copy is cleaned up by the next update.
-            let old = dst.with_extension("old");
-            let _ = fs::remove_file(&old);
-            fs::rename(&dst, &old)
-                .ctx(|| format!("replacing {} (is the game still running?)", dst.display()))?;
-        }
         if wants_crlf(&e.path) {
             let d = fs::read(src)?;
-            fs::write(&dst, lf_to_crlf(&d)).ctx(|| format!("writing {}", dst.display()))?;
-        } else if fs::rename(src, &dst).is_err() {
-            fs::copy(src, &dst).ctx(|| format!("writing {}", dst.display()))?;
+            fs::write(src, lf_to_crlf(&d)).ctx(|| format!("staging {}", dst.display()))?;
         }
+        replace_staged(src, &dst)?;
     }
     for f in &plan.delete {
         let p = util::join_slash(root, f);
         match fs::remove_file(&p) {
             Ok(()) => log(format!("removed {f}")),
-            Err(e) => log(format!("could not remove {f}: {e}")),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e).ctx(|| format!("removing {}", p.display())),
         }
     }
     save_state(root, &plan.commit, &plan.all)?;
     let _ = fs::remove_dir_all(&work);
+    Ok(())
+}
+
+fn cleanup_old_images(exe: &Path) {
+    let first = exe.with_extension("old");
+    let _ = fs::remove_file(&first);
+    let Some(stem) = first.file_name().and_then(|name| name.to_str()) else {
+        return;
+    };
+    let prefix = format!("{stem}-");
+    if let Some(dir) = exe.parent() {
+        for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+            let name = entry.file_name();
+            let Some(suffix) = name.to_str().and_then(|name| name.strip_prefix(&prefix)) else {
+                continue;
+            };
+            let Some((pid, index)) = suffix.split_once('-') else {
+                continue;
+            };
+            if pid.parse::<u32>().is_ok() && index.parse::<u32>().is_ok() {
+                let _ = fs::remove_file(entry.path());
+            }
+        }
+    }
+}
+
+fn replace_staged(src: &Path, dst: &Path) -> Result<()> {
+    let Err(error) = fs::rename(src, dst) else {
+        return Ok(());
+    };
+    if !cfg!(windows) || !is_executable(dst) || !dst.is_file() {
+        return Err(error).ctx(|| format!("replacing {}", dst.display()));
+    }
+    // Windows allows renaming an executing image. Keep the old image until it exits and
+    // restore its original name if the staged move fails.
+    let mut old = dst.with_extension("old");
+    let pid = std::process::id();
+    let mut index = 0u32;
+    while old.try_exists()? {
+        index += 1;
+        old = dst.with_extension(format!("old-{pid}-{index}"));
+    }
+    fs::rename(dst, &old).ctx(|| format!("backing up {}", dst.display()))?;
+    if let Err(error) = fs::rename(src, dst) {
+        fs::rename(&old, dst).ctx(|| {
+            format!(
+                "restoring {} after replacement failed: {error}",
+                dst.display()
+            )
+        })?;
+        return Err(error).ctx(|| format!("replacing {}", dst.display()));
+    }
     Ok(())
 }
 
@@ -1119,6 +1445,7 @@ mod tests {
         let mut plan = Plan {
             commit: "a".repeat(40),
             previous_commit: Some("b".repeat(40)),
+            release_tag: None,
             fetch: vec![],
             delete: vec![],
             all: vec![],
@@ -1171,6 +1498,7 @@ mod tests {
     #[test]
     fn line_ends() {
         let d = std::env::temp_dir().join("ifupd_eol_test.txt");
+        let exe = d.with_extension("exe");
         fs::write(&d, b"hello\r\n").unwrap();
         assert!(local_matches(
             &d,
@@ -1180,9 +1508,83 @@ mod tests {
             &d,
             "0000000000000000000000000000000000000000"
         ));
+        fs::write(&exe, b"hello\r\n").unwrap();
+        assert!(!local_matches(
+            &exe,
+            "ce013625030ba8dba906f756967f9e9ca394464a"
+        ));
+        let _ = fs::remove_file(&exe);
         let _ = fs::remove_file(&d);
         assert_eq!(lf_to_crlf(b"a\nb\r\nc\n"), b"a\r\nb\r\nc\r\n");
         assert_eq!(crlf_to_lf(b"a\r\nb\rc"), b"a\nb\rc");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn repeated_replacements_keep_all_running_images() {
+        use std::io::Read;
+
+        const HOLD_IMAGE: &str = "INFAMOUS_TEST_HOLD_RUNNING_IMAGE";
+        if std::env::var_os(HOLD_IMAGE).is_some() {
+            let _ = std::io::stdin().read(&mut [0u8]);
+            return;
+        }
+
+        let root =
+            std::env::temp_dir().join(format!("infamous-running-images-{}", std::process::id()));
+        fs::create_dir(&root).unwrap();
+        let exe = root.join("launcher.exe");
+        let staged = root.join("staged");
+        let launch = || {
+            let mut child = Command::new(&exe)
+                .args([
+                    "--exact",
+                    "update::tests::repeated_replacements_keep_all_running_images",
+                ])
+                .env(HOLD_IMAGE, "1")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .spawn()
+                .unwrap();
+            let input = child.stdin.take().unwrap();
+            (child, input)
+        };
+
+        let mut bytes = fs::read(std::env::current_exe().unwrap()).unwrap();
+        fs::write(&exe, &bytes).unwrap();
+        let v1 = blob_sha(&bytes);
+        let (mut first, first_input) = launch();
+        bytes.extend_from_slice(b"second version");
+        fs::write(&staged, &bytes).unwrap();
+        replace_staged(&staged, &exe).unwrap();
+
+        let v2 = blob_sha(&bytes);
+        let (mut second, second_input) = launch();
+        bytes.extend_from_slice(b"third version");
+        fs::write(&staged, &bytes).unwrap();
+        cleanup_old_images(&exe);
+        replace_staged(&staged, &exe).unwrap();
+        let first_backup = exe.with_extension("old");
+        let second_backup = exe.with_extension(format!("old-{}-1", std::process::id()));
+        assert_eq!(git_blob_sha(&first_backup).as_deref(), Some(v1.as_str()));
+        assert_eq!(git_blob_sha(&second_backup).as_deref(), Some(v2.as_str()));
+        assert_eq!(
+            git_blob_sha(&exe).as_deref(),
+            Some(blob_sha(&bytes).as_str())
+        );
+
+        drop(first_input);
+        assert!(first.wait().unwrap().success());
+        cleanup_old_images(&exe);
+        assert!(!first_backup.exists());
+        assert!(second_backup.exists());
+
+        drop(second_input);
+        assert!(second.wait().unwrap().success());
+        cleanup_old_images(&exe);
+        assert!(!second_backup.exists());
+        fs::remove_file(&exe).unwrap();
+        fs::remove_dir(&root).unwrap();
     }
 
     #[test]
