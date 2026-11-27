@@ -65,8 +65,8 @@ infamous-installer update --channel bleeding-edge --check
 
 The official manifest enables GitHub release channels in `infamous.toml`. Stable is the default.
 The launcher saves the opted-in channel under `.installer`, and the updater uses that selection
-unless the command specifies `--channel` or `--branch`. The explicit branch option supports
-development trees and forks.
+unless the command specifies `--channel`, `--branch`, or `--repo`. An explicit `--repo` uses
+the configured branch unless you supply `--branch` or `--channel` to choose a different source.
 
 The updater resolves the selected release tag to its commit and file list, compares each file's
 git blob hash with the local file (a CRLF copy of an LF file counts as equal), downloads only the

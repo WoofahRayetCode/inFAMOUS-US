@@ -690,7 +690,11 @@ fn save_state(root: &Path, commit: &str, files: &[String]) -> Result<()> {
     for f in files {
         s.push_str(&format!("file {f}\n"));
     }
-    util::write_file(&state_path(root), s.as_bytes())
+    let path = state_path(root);
+    util::ensure_parent(&path)?;
+    let tmp = path.with_extension("state-tmp");
+    fs::write(&tmp, s).ctx(|| format!("writing {}", tmp.display()))?;
+    fs::rename(&tmp, &path).ctx(|| format!("replacing {}", path.display()))
 }
 
 fn blob_sha(data: &[u8]) -> String {
@@ -1337,6 +1341,16 @@ pub fn apply(
     }
     // 2. Into place. Keep the marker if installation is interrupted or the rebuild fails.
     util::write_file(&pending_marker(root), plan.commit.as_bytes())?;
+    // Remember new paths before replacing anything so another release can remove
+    // files left behind if this update stops partway through.
+    let new_files: Vec<_> = staged
+        .iter()
+        .filter(|(_, entry)| !util::join_slash(root, &entry.path).exists())
+        .map(|(_, entry)| entry.path.clone())
+        .collect();
+    if !new_files.is_empty() {
+        record_installed(root, &new_files)?;
+    }
     for (src, e) in &staged {
         let dst = util::join_slash(root, &e.path);
         util::ensure_parent(&dst)?;

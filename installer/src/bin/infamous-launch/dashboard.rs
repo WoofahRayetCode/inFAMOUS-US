@@ -1022,11 +1022,15 @@ impl Dashboard {
                     }
                 } else if install {
                     let root = &self.state.launch.root;
-                    match Manifest::load(&root.join("installer/infamous.toml")) {
-                        Ok(manifest) => {
-                            // Restart the installed release executable, even when this dashboard
-                            // was opened from a renamed copy.
-                            let launcher = root.join(update::launcher_name(&manifest.game_title));
+                    let launcher = if preview.release_tag.is_some() {
+                        Manifest::load(&root.join("installer/infamous.toml"))
+                            .map(|manifest| root.join(update::launcher_name(&manifest.game_title)))
+                            .map_err(|error| error.to_string())
+                    } else {
+                        std::env::current_exe().map_err(|error| error.to_string())
+                    };
+                    match launcher {
+                        Ok(launcher) => {
                             let repaint = ctx.clone();
                             let installer = setup::Installer::start_launcher_update(
                                 root.clone(),

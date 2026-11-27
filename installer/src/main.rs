@@ -47,7 +47,7 @@ OPTIONS
   -y, --yes         don't ask questions; fail instead
   --check           (update) only report whether an update is available
   --expect-commit SHA (update) apply only if the source still resolves to the reviewed commit
-  --repo OWNER/NAME (update) repository to update from (default: [update] in infamous.toml)
+  --repo OWNER/NAME (update) use a different repository's branch unless --channel is set
   --channel NAME    (update) stable or bleeding-edge (defaults to the saved preference)
   --branch NAME     (update) use a raw branch instead of a release channel
   --iso FILE        (extract-iso) the disc image
@@ -635,10 +635,14 @@ fn cmd_update(s: &Session) -> Result<()> {
     }
     println!("{} PC port: update", s.m.game_title);
     println!("Folder: {}", s.root.display());
-    let channel = s.o.channel.or_else(|| {
-        (s.o.branch.is_none() && s.m.update_releases).then(|| update_channel::preferred(&s.root))
+    let repo = s.o.repo.as_deref();
+    let branch = s.o.branch.as_deref().or_else(|| {
+        (repo.is_some() && s.o.channel.is_none()).then_some(s.m.update_branch.as_str())
     });
-    let remote = update::Remote::new(&s.m, s.o.repo.as_deref(), s.o.branch.as_deref(), channel)?;
+    let channel = s.o.channel.or_else(|| {
+        (branch.is_none() && s.m.update_releases).then(|| update_channel::preferred(&s.root))
+    });
+    let remote = update::Remote::new(&s.m, repo, branch, channel)?;
     let st = lock::State::load(&s.root.join(".installer").join("state"));
     if st.eboot.is_none() && !s.o.check && !s.o.force {
         bail!(
