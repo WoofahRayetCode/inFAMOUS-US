@@ -45,6 +45,10 @@ static int dlss_hooks_on(void) { static int on = -1; if (on < 0) on = rsx_dlss_h
 #include <windows.h>
 #include "rsx_bench_present.h"
 
+/* F1 performance overlay receives native-frame timing and FG present-rate samples. */
+extern void uiov_perf_record_native_frame(double frame_time_ms);
+extern void uiov_perf_update_rates(double native_fps, double fg_fps, double output_fps, int fg_valid);
+
 /* D3D12 headers */
 #include <d3d12.h>
 #include "rsx_d3d12_abi.h"   /* struct-returning D3D12 calls for every Windows SDK */
@@ -599,6 +603,7 @@ typedef struct {
 } D3D12State;
 
 static D3D12State s_d3d;
+static int s_fg_present_proxy_active = 0; /* set only when AMD successfully wraps the swap chain */
 /* v154 RES_SCALE (default 1 = PS3 720p): internal resolution. Every render target / depth surface at the
  * guest display size (1280x720) is allocated at s_bbw x s_bbh instead, the swap chain too; viewports of
  * draws into them are scaled, fragment WPOS is scaled back to guest pixels (b1 rsx_wscale), and everything
@@ -1411,8 +1416,8 @@ static LRESULT CALLBACK d3d12_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         if (wp == VK_ESCAPE) {
             const char* e = getenv("ESC_QUITS");
             if (e && *e == '1') { s_d3d.window_closed = 1; DestroyWindow(hwnd); }
-        } else if (wp == VK_F1 && !(lp & (1 << 30))) {   /* v212: F1 = FPS counter on/off (rsx_ui_overlay.c) */
-            extern volatile int g_uiov_show_fps; g_uiov_show_fps = !g_uiov_show_fps;
+        } else if (wp == VK_F1 && !(lp & (1 << 30))) {   /* PERF OVERLAY v2: F1 cycles off / compact / detailed. */
+            extern volatile int g_uiov_show_fps; g_uiov_show_fps = (g_uiov_show_fps + 1) % 3;
         } else if (wp == VK_F11 && !(lp & (1 << 30))) {   /* F11 = fullscreen (v212: F1 no longer) */
             static WINDOWPLACEMENT wpl; static LONG style = 0;
             if (!g_win_fullscreen) {
@@ -1666,6 +1671,7 @@ static int init_d3d12(u32 width, u32 height)
     /* FSR_FG=1: AMD FSR frame generation replaces the swap chain with its proxy (which presents real + generated frames) */
     { const int fgw = rsx_dlss_wrap_swapchain((void**)&s_d3d.swap_chain, s_d3d.cmd_queue);
       if (fgw < 0) { printf("[D3D12] ERROR: no swap chain left after the frame generation wrap\n"); return -1; }
+      s_fg_present_proxy_active = fgw > 0;
       if (fgw > 0) s_d3d.frame_index = s_d3d.swap_chain->lpVtbl->GetCurrentBackBufferIndex(s_d3d.swap_chain); }
 #endif
     /* Create RTV descriptor heap */
@@ -8961,7 +8967,9 @@ void rsx_d3d12_heartbeat(void)
     if (s_adapter3) {
         DXGI_QUERY_VIDEO_MEMORY_INFO li; memset(&li, 0, sizeof li);
         if (SUCCEEDED(s_adapter3->lpVtbl->QueryVideoMemoryInfo(s_adapter3, 0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &li))) {
-            vu = li.CurrentUsage >> 20; vb = li.Budget >> 20; }
+            vu = li.CurrentUsage >> 20; vb = li.Budget >> 20;
+            { extern volatile unsigned long long g_ui_vram_mb[2]; g_ui_vram_mb[0] = vu; g_ui_vram_mb[1] = vb; }
+        }
     }
     char lps[32];
     if (lp) snprintf(lps, sizeof lps, "%llu ms ago", (unsigned long long)(now - lp)); else snprintf(lps, sizeof lps, "never");
@@ -9496,6 +9504,7 @@ static void gq_frame_end(void)
 }
 static void render_frame_exec(void)
 {
+    static unsigned long long s_fg_native_present_total = 0;
     double _rf0 = perf_on() ? perf_now() : 0.0;
     rft_start();
     u32 fi = s_d3d.frame_index;
@@ -11681,7 +11690,22 @@ skip_dump_consider: ;
         } else {
             ph = s_d3d.swap_chain->lpVtbl->Present(s_d3d.swap_chain, si, flags);
         }
-        if (FAILED(ph)) d3d12_present_failed(ph);
+        if (SUCCEEDED(ph)) {
+            static LARGE_INTEGER fg_qpf = {0}, fg_last_present_qpc = {0};
+            LARGE_INTEGER fg_now_qpc;
+            s_fg_native_present_total++;  /* successful game-owned Present() */
+            if (!fg_qpf.QuadPart) QueryPerformanceFrequency(&fg_qpf);
+            if (fg_qpf.QuadPart > 0 && QueryPerformanceCounter(&fg_now_qpc)) {
+                if (fg_last_present_qpc.QuadPart && fg_now_qpc.QuadPart > fg_last_present_qpc.QuadPart) {
+                    const double frame_ms = (double)(fg_now_qpc.QuadPart - fg_last_present_qpc.QuadPart) *
+                                            1000.0 / (double)fg_qpf.QuadPart;
+                    uiov_perf_record_native_frame(frame_ms);
+                }
+                fg_last_present_qpc = fg_now_qpc;
+            }
+        } else {
+            d3d12_present_failed(ph);
+        }
     }
     rft_mark(RFT_PRESENT);
 
@@ -11699,6 +11723,48 @@ skip_dump_consider: ;
         ULONGLONG tnow = GetTickCount64();
         if (s_tt0 == 0) s_tt0 = tnow;
         if (tnow - s_tt0 >= 1000 && s_d3d.hwnd) {
+            /* Sample the AMD-wrapped swap-chain count alongside successful native Presents.
+             * On the validated FSR proxy, output_delta - native_delta is generated-frame count. */
+            {
+                static ULONGLONG fg_sample_tick = 0;
+                static UINT fg_last_proxy_count = 0;
+                static unsigned long long fg_last_native_count = 0;
+                UINT fg_proxy_count = 0;
+                HRESULT fg_hr = s_d3d.swap_chain
+                    ? s_d3d.swap_chain->lpVtbl->GetLastPresentCount(s_d3d.swap_chain, &fg_proxy_count)
+                    : E_POINTER;
+                double native_fps = 0.0, generated_fps = 0.0, output_fps = 0.0;
+                const int count_query_ok = SUCCEEDED(fg_hr);
+                const int fg_valid = count_query_ok && s_fg_present_proxy_active;
+
+                if (count_query_ok) {
+                    if (fg_sample_tick != 0 && tnow > fg_sample_tick) {
+                        const ULONGLONG elapsed_ms = tnow - fg_sample_tick;
+                        const UINT output_delta = fg_proxy_count - fg_last_proxy_count;
+                        const unsigned long long native_delta = s_fg_native_present_total - fg_last_native_count;
+                        const double scale = 1000.0 / (double)elapsed_ms;
+                        native_fps = (double)native_delta * scale;
+                        output_fps = (double)output_delta * scale;
+                        if (fg_valid) {
+                            const unsigned long long generated_delta = output_delta > native_delta
+                                ? (unsigned long long)output_delta - native_delta : 0ULL;
+                            generated_fps = (double)generated_delta * scale;
+                        }
+                    }
+                    fg_sample_tick = tnow;
+                    fg_last_proxy_count = fg_proxy_count;
+                    fg_last_native_count = s_fg_native_present_total;
+                } else {
+                    /* Re-baseline after a failed query so the next valid sample cannot span a stale interval. */
+                    fg_sample_tick = 0;
+                    fg_last_native_count = s_fg_native_present_total;
+                    static unsigned fg_count_failures = 0;
+                    if (fg_count_failures++ < 5)
+                        fprintf(stderr, "[F1PERF] AMD present-count query failed: 0x%08lX%c",
+                                (unsigned long)fg_hr, 10);
+                }
+                uiov_perf_update_rates(native_fps, generated_fps, output_fps, fg_valid);
+            }
             extern char g_rsx_title_base[128];
             char tb[256];
             /* v228: show the size actually rendered (RES_SCALE backbuffer), not the guest's 1280x720 */

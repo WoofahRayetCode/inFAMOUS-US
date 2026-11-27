@@ -268,6 +268,44 @@ static void rect(float x0, float y0, float x1, float y1, const float c0[4], cons
 }
 static void rgba(float o[4], float r, float g, float b, float a) { o[0] = r; o[1] = g; o[2] = b; o[3] = a; }
 
+/* F2 setting arrows are geometry, not font glyphs: the extracted game font may
+ * not contain '<', so text_draw() can silently replace that character with a space. */
+static void uiov_solid_triangle(float x0, float y0, float x1, float y1, float x2, float y2,
+                                const float col[4])
+{
+    if (s_nv + 3 > UIOV_MAX_VERTS) return;
+    const float u = (s_wx + 0.5f) / s_aw, v = (s_wy + 0.5f) / s_ah;
+    UVert* o = s_v + s_nv;
+    o[0] = (UVert){ x0, y0, u, v, col[0], col[1], col[2], col[3] };
+    o[1] = (UVert){ x1, y1, u, v, col[0], col[1], col[2], col[3] };
+    o[2] = (UVert){ x2, y2, u, v, col[0], col[1], col[2], col[3] };
+    s_nv += 3;
+}
+
+static void uiov_solid_line(float x0, float y0, float x1, float y1, float thickness,
+                            const float col[4])
+{
+    const float dx = x1 - x0, dy = y1 - y0;
+    const float len = sqrtf(dx * dx + dy * dy);
+    if (len < 0.001f) return;
+    const float nx = -dy * thickness * 0.5f / len;
+    const float ny =  dx * thickness * 0.5f / len;
+    uiov_solid_triangle(x0 + nx, y0 + ny, x1 + nx, y1 + ny, x1 - nx, y1 - ny, col);
+    uiov_solid_triangle(x0 + nx, y0 + ny, x1 - nx, y1 - ny, x0 - nx, y0 - ny, col);
+}
+
+static void uiov_menu_chevron(float cx, float cy, float height, int points_left, const float col[4])
+{
+    const float hw = height * 0.30f, half = height * 0.5f, thick = height * 0.105f;
+    if (points_left) {
+        uiov_solid_line(cx + hw, cy - half, cx - hw, cy, thick, col);
+        uiov_solid_line(cx - hw, cy, cx + hw, cy + half, thick, col);
+    } else {
+        uiov_solid_line(cx - hw, cy - half, cx + hw, cy, thick, col);
+        uiov_solid_line(cx + hw, cy, cx - hw, cy + half, thick, col);
+    }
+}
+
 static unsigned utf8_next(const unsigned char** p)
 {
     const unsigned char* s = *p; unsigned c = *s++;
@@ -532,12 +570,14 @@ int (*volatile g_uiov_paused_fn)(void) = 0;
 volatile unsigned long long g_pause_menu_built_ms = 0;   /* infamous-recomp/stubs.cpp: last time the pause menu was built */
 /* v195: set by the native pause-menu entries (stubs.cpp, script natives on the PPU thread): 1 = Settings, 2 = Quit Game */
 volatile int g_uiov_request = 0;
+static float s_perf_overlay_scale = 1.0f; /* F1 overlay size: 0.50-1.00, live from F2 settings */
 /* v243K: val/name 8 -> 12 (Language has 12 choices) */
 typedef struct { const char* key; const char* label; int restart; int n; const char* val[12]; const char* name[12]; int cur, saved; } MItem;
 static MItem s_mi[] = {
     { "FULLSCREEN",      "Display Mode",       0, 2, { "0", "1" }, { "Windowed", "Fullscreen" } },
     { "PRESENT_VSYNC",   "VSync",              0, 2, { "0", "1" }, { "Off", "On" } },
     { "UI_FPS_CAP",      "Frame Rate Limit",   0, 9, { "0", "30", "40", "45", "50", "60", "120", "144", "240" }, { "Off", "30 FPS", "40 FPS", "45 FPS", "50 FPS", "60 FPS", "120 FPS", "144 FPS", "240 FPS" } },   /* v209b: Auto removed */
+    { "PERF_OVERLAY_SCALE", "Performance Overlay Size", 0, 11, { "50", "55", "60", "65", "70", "75", "80", "85", "90", "95", "100" }, { "50%", "55%", "60%", "65%", "70%", "75%", "80%", "85%", "90%", "95%", "100%" } },
     { "KBM_GLYPHS",      "Button Prompts",     0, 6, { "1", "0", "2", "3", "4", "5" }, { "Automatic", "PlayStation", "Keyboard & Mouse", "Xbox", "Nintendo", "Steam Deck" } },
     { "PAD_MOUSE_SPEED", "Mouse Speed",        0, 5, { "900", "650", "450", "325", "225" }, { "1 (Slow)", "2", "3", "4", "5 (Fast)" } },
     { "WINDOW_SIZE",     "Window Size",        0, 3, { "auto", "720p", "1080p" }, { "Match Game Resolution", "720p (1280 x 720)", "1080p (1920 x 1080)" } },
@@ -594,6 +634,7 @@ static void menu_apply(int i, HWND hwnd, int initializing)
     else if (!strcmp(m->key, "UI_FPS_CAP")) g_ui_fps_cap = atoi(v);
     else if (!strcmp(m->key, "KBM_GLYPHS")) g_ui_kbm_glyphs = atoi(v);
     else if (!strcmp(m->key, "PAD_MOUSE_SPEED")) g_ui_mouse_speed = atoi(v);
+    else if (!strcmp(m->key, "PERF_OVERLAY_SCALE")) s_perf_overlay_scale = (float)atoi(v) * 0.01f;
     else if (!strcmp(m->key, "WINDOW_SIZE") && hwnd && !initializing) {
         /* Startup already sized the window. Subsequent changes belong to its owner thread. */
         if (!PostMessageA(hwnd, RSX_WM_WINDOW_SIZE, rsx_window_preset_from_setting(v), 0))
@@ -658,6 +699,7 @@ static void menu_init(HWND hwnd)
             if (!strcmp(m->key, "PAD_MOUSE_SPEED")) k = 2;
             else if (!strcmp(m->key, "RES_SCALE")) k = 1;
             else if (!strcmp(m->key, "UI_FPS_CAP")) k = 5;
+            else if (!strcmp(m->key, "PERF_OVERLAY_SCALE")) k = m->n - 1; /* default 100% */
             else k = 0;
         }
         m->cur = m->saved = k;
@@ -689,7 +731,12 @@ static void menu_close(void)
 static void menu_change(int i, int d, HWND hwnd)
 {
     MItem* m = &s_mi[i];
-    if (m->cur < 0) m->cur = d > 0 ? 0 : m->n - 1;
+    if (!strcmp(m->key, "PERF_OVERLAY_SCALE")) {
+        /* This setting has hard 50%-100% bounds; Left reduces, Right increases. */
+        if (m->cur < 0) m->cur = m->n - 1;
+        else if (d < 0 && m->cur > 0) m->cur--;
+        else if (d > 0 && m->cur < m->n - 1) m->cur++;
+    } else if (m->cur < 0) m->cur = d > 0 ? 0 : m->n - 1;
     else m->cur = (m->cur + d + m->n) % m->n;
     menu_apply(i, hwnd, 0);
     if (m->restart) s_restart_note = 1;
@@ -905,8 +952,27 @@ static void build_menu(void)
             if (m->restart) { const char* rs = "(restart)"; float lw = text_width(m->label, (int)strlen(m->label), lsz);
                               float g2[4]; rgba(g2, 0.45f, 0.45f, 0.45f, 1); text_draw(rs, 9, x0 + lw + 12.0f, y + rh * 0.15f, lsz * 0.7f, g2); }   /* v243K: scales with the row */
             const char* value = m->cur >= 0 ? m->name[m->cur] : "Custom";
-            char v[96]; snprintf(v, sizeof v, "%s   %s   %s", on ? "<" : " ", value, on ? ">" : " ");
-            text_draw(v, (int)strlen(v), x1 - text_width(v, (int)strlen(v), lsz), y, lsz, on ? wt : gr);
+            const int value_len = (int)strlen(value);
+            const float value_w = text_width(value, value_len, lsz);
+            int can_left = on, can_right = on;
+            if (on && !strcmp(m->key, "PERF_OVERLAY_SCALE") && m->cur >= 0) {
+                /* This scale is bounded: 100% only moves left; 50% only moves right. */
+                can_left = m->cur > 0;
+                can_right = m->cur < m->n - 1;
+            }
+            const float arrow_h = lsz * 0.48f;
+            const float arrow_w = arrow_h * 0.60f;
+            const float gap = lsz * 0.34f;
+            const float group_w = value_w + (can_left ? arrow_w + gap : 0.0f) +
+                                              (can_right ? arrow_w + gap : 0.0f);
+            const float group_x = x1 - group_w;
+            const float value_x = group_x + (can_left ? arrow_w + gap : 0.0f);
+            if (can_left)
+                uiov_menu_chevron(group_x + arrow_w * 0.5f, y + rh * 0.5f, arrow_h, 1, on ? wt : gr);
+            text_draw(value, value_len, value_x, y, lsz, on ? wt : gr);
+            if (can_right)
+                uiov_menu_chevron(value_x + value_w + gap + arrow_w * 0.5f,
+                                  y + rh * 0.5f, arrow_h, 0, on ? wt : gr);
         } else {
             const char* t = r == MR_RESUME ? "Back" : "Quit Game";
             text_draw(t, (int)strlen(t), x0, y, lsz, col);
@@ -1106,28 +1172,182 @@ static void tr_hud_build(void)
     text_draw(s_tr_hud, len, x0 + 12.0f, y0 + 14.0f - sz * 0.62f, sz, fg);
 }
 static void uiov_draw_list(ID3D12GraphicsCommandList* cl, D3D12_CPU_DESCRIPTOR_HANDLE rtv, unsigned bbw, unsigned bbh);
-/* v212 F1 FPS counter: frames this overlay was drawn for (= presented guest frames), averaged over 0.5 s, top-left. */
+/* PERF OVERLAY v3: F1 cycles off -> FPS/FG FPS -> detailed. PERF_OVERLAY=1|2 starts it on.
+ * Native FPS and frame-time samples come from successful game-owned Present calls.
+ * FG/output rates come from the validated AMD-wrapped swap-chain present counter. */
 volatile int g_uiov_show_fps = 0;
-static double s_fps_val = 0.0;
+volatile unsigned long long g_ui_vram_mb[2] = { 0, 0 };
+
+#define PF_RING 600
+#define PF_BARS 120
+
+static double s_fps_val = 0.0, s_fg_fps_val = 0.0, s_output_fps_val = 0.0;
+static int s_fg_metrics_valid = 0;
+static double s_pf_max = 0.0, s_pf_low1 = 0.0;
+static float s_pf_ring[PF_RING];
+static unsigned s_pf_n = 0, s_pf_i = 0;
+
+/* Called after each successful native Present; generated frames never enter this ring. */
+void uiov_perf_record_native_frame(double frame_time_ms)
+{
+    if (frame_time_ms > 0.0 && frame_time_ms < 2000.0) {
+        s_pf_ring[s_pf_i] = (float)frame_time_ms;
+        s_pf_i = (s_pf_i + 1) % PF_RING;
+        if (s_pf_n < PF_RING) s_pf_n++;
+    }
+}
+
+/* Rates are sampled once per second from the native-present total and AMD proxy counter. */
+void uiov_perf_update_rates(double native_fps, double fg_fps, double output_fps, int fg_valid)
+{
+    s_fps_val = native_fps;
+    s_fg_fps_val = fg_fps;
+    s_output_fps_val = output_fps;
+    s_fg_metrics_valid = fg_valid != 0;
+}
+
+static int s_pf_cmp(const void* a, const void* b)
+{
+    const float x = *(const float*)a, y = *(const float*)b;
+    return (x < y) ? -1 : (x > y) ? 1 : 0;
+}
+
 static void fps_tick(void)
 {
-    static LARGE_INTEGER f, t0; static unsigned n = 0;
-    LARGE_INTEGER t; QueryPerformanceCounter(&t);
-    if (!f.QuadPart) { QueryPerformanceFrequency(&f); t0 = t; }
-    n++;
-    const double dt = (double)(t.QuadPart - t0.QuadPart) / (double)f.QuadPart;
-    if (dt >= 0.5) { s_fps_val = n / dt; n = 0; t0 = t; }
+    static LARGE_INTEGER freq, last_stats;
+    static int init = 0;
+    LARGE_INTEGER now;
+
+    if (!init) {
+        const char* e = getenv("PERF_OVERLAY");
+        if (e && *e >= '0' && *e <= '2')
+            g_uiov_show_fps = *e - '0';
+        if (QueryPerformanceFrequency(&freq) && freq.QuadPart > 0 && QueryPerformanceCounter(&now))
+            last_stats = now;
+        init = 1;
+        return;
+    }
+
+    if (!freq.QuadPart || !QueryPerformanceCounter(&now)) return;
+    if (!last_stats.QuadPart || now.QuadPart <= last_stats.QuadPart ||
+        (double)(now.QuadPart - last_stats.QuadPart) < (double)freq.QuadPart * 0.5)
+        return;
+    last_stats = now;
+
+    /* Use the slowest 1% of recent native frame times, not the fastest 1%. */
+    if (s_pf_n) {
+        float tmp[PF_RING];
+        double mx = 0.0, slow_sum = 0.0;
+        unsigned i, k;
+
+        for (i = 0; i < s_pf_n; i++) {
+            tmp[i] = s_pf_ring[i];
+            if (tmp[i] > mx) mx = tmp[i];
+        }
+        s_pf_max = mx;
+
+        if (s_pf_n >= 100) {
+            qsort(tmp, s_pf_n, sizeof tmp[0], s_pf_cmp);
+            k = (s_pf_n + 99u) / 100u;
+            if (k < 1) k = 1;
+            for (i = s_pf_n - k; i < s_pf_n; i++) slow_sum += tmp[i];
+            s_pf_low1 = 1000.0 / (slow_sum / k);
+        }
+    }
 }
+
 static void fps_build(void)
 {
-    if (!g_uiov_show_fps) return;
-    char t[32]; snprintf(t, sizeof t, "%.0f FPS", s_fps_val);
-    const float sz = 26.0f, w = text_width(t, (int)strlen(t), sz);
-    float bg[4], fg[4];
-    rgba(bg, 0, 0, 0, 0.55f); rect(16.0f, 16.0f, 16.0f + w + 24.0f, 16.0f + 40.0f, bg, bg, 0);
-    if (s_fps_val >= 58.0) rgba(fg, 0.55f, 1.0f, 0.55f, 1); else if (s_fps_val >= 45.0) rgba(fg, 1.0f, 0.9f, 0.4f, 1); else rgba(fg, 1.0f, 0.5f, 0.45f, 1);
-    text_draw(t, (int)strlen(t), 28.0f, 16.0f + 20.0f - sz * 0.62f, sz, fg);
+    const int mode = g_uiov_show_fps;
+    const float scale = (s_perf_overlay_scale >= 0.50f && s_perf_overlay_scale <= 1.00f)
+        ? s_perf_overlay_scale : 1.00f;
+    char ln[4][96];
+    float lsz[4], lh[4], lc[4][4];
+    int nl = 0, i, graph;
+    float w = 0.0f, hsum = 0.0f, gh, y;
+    const float x0 = 16.0f, y0 = 16.0f;
+    float bg[4], gc[4];
+
+    if (mode <= 0) return;
+
+    if (s_fg_metrics_valid)
+        snprintf(ln[nl], sizeof ln[nl], "FPS %.0f   FG FPS %.0f", s_fps_val, s_fg_fps_val);
+    else
+        snprintf(ln[nl], sizeof ln[nl], "FPS %.0f", s_fps_val);
+    lsz[nl] = 26.0f;
+    lh[nl] = 40.0f;
+    if (s_fps_val >= 58.0) rgba(lc[nl], 0.55f, 1.0f, 0.55f, 1);
+    else if (s_fps_val >= 45.0) rgba(lc[nl], 1.0f, 0.9f, 0.4f, 1);
+    else rgba(lc[nl], 1.0f, 0.5f, 0.45f, 1);
+    nl++;
+
+    /* Detailed mode (F1's third position) deliberately contains every metric. */
+    if (mode >= 2) {
+        const double frame_ms = s_fps_val > 0.0 ? 1000.0 / s_fps_val : 0.0;
+        snprintf(ln[nl], sizeof ln[nl], "OUTPUT %.0f FPS   FRAME %.2f ms", s_output_fps_val, frame_ms);
+        lsz[nl] = 18.0f; lh[nl] = 27.0f;
+        rgba(lc[nl], 0.92f, 0.94f, 0.98f, 1.0f); nl++;
+
+        if (s_pf_n >= 100)
+            snprintf(ln[nl], sizeof ln[nl], "1%% LOW %.0f FPS   WORST %.1f ms", s_pf_low1, s_pf_max);
+        else
+            snprintf(ln[nl], sizeof ln[nl], "1%% LOW --   WORST %.1f ms", s_pf_max);
+        lsz[nl] = 18.0f; lh[nl] = 27.0f;
+        if (s_pf_low1 >= 50.0) rgba(lc[nl], 0.85f, 0.95f, 0.85f, 1);
+        else if (s_pf_low1 >= 30.0) rgba(lc[nl], 1.0f, 0.9f, 0.4f, 1);
+        else rgba(lc[nl], 1.0f, 0.72f, 0.62f, 1);
+        nl++;
+
+        if (g_ui_vram_mb[1]) {
+            const unsigned long long vu = g_ui_vram_mb[0];
+            const unsigned long long vb = g_ui_vram_mb[1];
+            snprintf(ln[nl], sizeof ln[nl], "VRAM %llu / %llu MB", vu, vb);
+            if (vu * 10ULL >= vb * 9ULL) rgba(lc[nl], 1.0f, 0.5f, 0.45f, 1);
+            else rgba(lc[nl], 0.7f, 0.85f, 1.0f, 1);
+        } else {
+            snprintf(ln[nl], sizeof ln[nl], "VRAM --");
+            rgba(lc[nl], 0.8f, 0.85f, 0.9f, 1);
+        }
+        lsz[nl] = 18.0f; lh[nl] = 27.0f; nl++;
+    }
+
+    for (i = 0; i < nl; i++) {
+        const float lw = text_width(ln[i], (int)strlen(ln[i]), lsz[i] * scale);
+        if (lw > w) w = lw;
+        hsum += lh[i] * scale;
+    }
+
+    graph = (mode >= 2 && s_pf_n >= PF_BARS);
+    gh = graph ? 46.0f * scale : 0.0f;
+    if (graph && w < PF_BARS * 1.5f * scale) w = PF_BARS * 1.5f * scale;
+
+    rgba(bg, 0, 0, 0, 0.55f);
+    rect(x0, y0, x0 + w + 24.0f * scale,
+         y0 + hsum + gh + (graph ? 6.0f * scale : 0.0f), bg, bg, 0);
+
+    y = y0;
+    for (i = 0; i < nl; i++) {
+        text_draw(ln[i], (int)strlen(ln[i]), x0 + 12.0f * scale,
+                  y + lh[i] * scale * 0.5f - lsz[i] * scale * 0.62f,
+                  lsz[i] * scale, lc[i]);
+        y += lh[i] * scale;
+    }
+
+    if (graph) {
+        const float base = y + gh, bw = 1.2f * scale;
+        for (i = 0; i < PF_BARS; i++) {
+            const float ms = s_pf_ring[(s_pf_i + PF_RING - PF_BARS + (unsigned)i) % PF_RING];
+            const float cl = ms > 50.0f ? 50.0f : ms;
+            const float bh = 2.0f * scale + cl * (gh - 6.0f * scale) / 50.0f;
+            if (ms <= 18.5f) rgba(gc, 0.45f, 0.95f, 0.45f, 0.9f);
+            else if (ms <= 33.4f) rgba(gc, 1.0f, 0.88f, 0.35f, 0.9f);
+            else rgba(gc, 1.0f, 0.45f, 0.4f, 0.95f);
+            rect(x0 + 12.0f * scale + i * 1.5f * scale, base - bh,
+                 x0 + 12.0f * scale + i * 1.5f * scale + bw, base, gc, gc, 0);
+        }
+    }
 }
+
 static void uiov_draw_list(ID3D12GraphicsCommandList* cl, D3D12_CPU_DESCRIPTOR_HANDLE rtv, unsigned bbw, unsigned bbh);
 static SceNpTrophyNotice s_trophy_notice;
 static ULONGLONG s_trophy_notice_until;

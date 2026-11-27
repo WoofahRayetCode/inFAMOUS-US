@@ -599,7 +599,7 @@ static void load_settings_ini(void)
     if (!f) return;
     static const char* keys[] = { "FULLSCREEN", "PRESENT_VSYNC", "UI_FPS_CAP", "KBM_GLYPHS", "PAD_MOUSE_SPEED",
                                   "WINDOW_SIZE", "RES_SCALE", "SHADOWS", "TEX_ANISO", "TEX_MIPS",
-                                  "UPSCALER", "FSR_FG", "PS3_LANG" };   /* v243K menu rows (were silently dropped) */
+                                  "UPSCALER", "FSR_FG", "PS3_LANG", "PERF_OVERLAY_SCALE" };   /* v243K menu rows (were silently dropped) */
     char line[256]; int n = 0;
     while (fgets(line, sizeof line, f)) {
         char* eq = strchr(line, '='); if (!eq || line[0] == ';' || line[0] == '#') continue;

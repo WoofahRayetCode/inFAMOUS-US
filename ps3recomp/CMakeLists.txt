@@ -350,6 +350,9 @@ elseif(MSVC)
     )
 endif()
 
+if(CMAKE_C_COMPILER_ID STREQUAL "Clang")
+    set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/libs/video/rsx_d3d12_backend.c" "${CMAKE_CURRENT_SOURCE_DIR}/libs/video/rsx_ui_overlay.c" PROPERTIES COMPILE_OPTIONS "-Wno-unsafe-buffer-usage")
+endif()
 if(NOT MSVC AND NOT WIN32)
     # dladdr/Dl_info (runtime/platform/win32_backtrace.h) are GNU extensions
     # that glibc hides unless _GNU_SOURCE is set. g++ defines it implicitly,
